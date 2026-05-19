@@ -1,4 +1,5 @@
 import {
+  pushCostCentersToCrm,
   pushLedgersToCrm,
   pushOutstandingsToCrm,
   pushPurchaseOrdersToCrm,
@@ -6,6 +7,7 @@ import {
   pushStockItemsToCrm,
 } from "./crm.client";
 import {
+  parseCostCenters,
   parseLedgers,
   parseOutstandings,
   parsePurchaseOrders,
@@ -13,6 +15,7 @@ import {
   parseStockItems,
 } from "./mapper";
 import {
+  fetchCostCentersXml,
   fetchLedgersXml,
   fetchOutstandingsXml,
   fetchPurchaseOrdersXml,
@@ -55,6 +58,16 @@ function summarizeStockItems(records: any[]) {
     availableForSale: item.availableForSale,
   }));
 }
+
+export type TallyCostCenterPayload = {
+  guid?: string | null;
+  name: string;
+  parent?: string | null;
+  category?: string | null;
+  description?: string | null;
+  isRevenue?: boolean;
+  isDeemedPositive?: boolean;
+};
 
 function normalizeName(value: any) {
   return String(value || "")
@@ -104,6 +117,17 @@ export async function runFullSync() {
 
     const ledgerResult = await pushLedgersToCrm(ledgers);
 
+    const costCentersXml = await fetchCostCentersXml();
+    const costCenters = parseCostCenters(costCentersXml);
+
+    console.log("[TALLY] Cost centers parsed:", costCenters.length);
+    console.log("[TALLY] Cost center sample:", costCenters.slice(0, 3));
+    const costCenterResult = await pushCostCentersToCrm(costCenters);
+
+    // if (costCenters.length) {
+    //   await pushCostCentersToCrm(costCenters);
+    // }
+
     const stockItemsXml = await fetchStockItemsXml();
     const stockXmlText = String(stockItemsXml || "");
 
@@ -138,6 +162,18 @@ export async function runFullSync() {
       ledgers,
     );
 
+    console.log("[PARSED OUTSTANDINGS SAMPLE]", {
+      total: outstandings.length,
+      sample: outstandings.slice(0, 5).map((x: any) => ({
+        ledgerName: x.ledgerName,
+        billRef: x.billRef,
+        voucherNumber: x.voucherNumber || x.voucherNo,
+        costCenterName: x.costCenterName || x.cost_center_name,
+        costCategory: x.costCategory || x.cost_category,
+        pendingAmount: x.pendingAmount || x.pending_amount,
+      })),
+    });
+
     const missingLedgerGuid = outstandings.filter((x) => !x.ledgerGuid);
 
     const outstandingResult = await pushOutstandingsToCrm(outstandings);
@@ -163,6 +199,10 @@ export async function runFullSync() {
       purchaseOrders: {
         count: purchaseOrders.length,
         result: purchaseOrderResult,
+      },
+      costCenters: {
+        count: costCenters.length,
+        result: costCenterResult,
       },
     };
   } finally {

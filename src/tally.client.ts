@@ -74,40 +74,46 @@ export async function fetchOutstandingsXml() {
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
     <TYPE>Collection</TYPE>
-    <ID>CRM Outstanding Bills</ID>
+    <ID>CRM Outstanding Vouchers</ID>
   </HEADER>
   <BODY>
     <DESC>
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>20260401</SVFROMDATE>
+        <SVTODATE>20270331</SVTODATE>
       </STATICVARIABLES>
 
       <TDL>
         <TDLMESSAGE>
-          <COLLECTION NAME="CRM Outstanding Bills" ISMODIFY="No">
-            <TYPE>Bill</TYPE>
+          <COLLECTION NAME="CRM Outstanding Vouchers" ISMODIFY="No">
+            <TYPE>Voucher</TYPE>
+            <BELONGSTO>Yes</BELONGSTO>
             <FETCH>
-              Name,
-              Parent,
+              Date,
               Guid,
-              LedgerGuid,
-              LedgerName,
-              PartyLedgerGuid,
-              PartyLedgerName,
-              PartyName,
-              BillParty,
-              BillDate,
-              DueDate,
-              BillDueDate,
-              OpeningBalance,
-              ClosingBalance,
-              CreditPeriod,
-              VoucherGuid,
+              VoucherKey,
+              MasterId,
+              AlterId,
               VoucherNumber,
               VoucherTypeName,
-              Reference
+              PartyLedgerName,
+              PartyName,
+              Reference,
+              Narration,
+              Amount,
+              LedgerEntries,
+              AllLedgerEntries,
+              BillAllocations,
+              CategoryAllocations,
+              CostCentreAllocations
             </FETCH>
+            <FILTER>OnlyAccountingVouchers</FILTER>
           </COLLECTION>
+
+          <SYSTEM TYPE="Formulae" NAME="OnlyAccountingVouchers">
+            NOT $$IsOrder:$VoucherTypeName
+          </SYSTEM>
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -224,6 +230,36 @@ export async function fetchPurchaseOrdersXml() {
           <SYSTEM TYPE="Formulae" NAME="OnlyPurchaseVouchers">
             $$IsPurchase:$VoucherTypeName
           </SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+
+  return postToTally(xml);
+}
+
+export async function fetchCostCentersXml() {
+  const xml = `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>CRM Cost Centers</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="CRM Cost Centers" ISMODIFY="No">
+            <TYPE>Cost Centre</TYPE>
+            <FETCH>Name,GUID,Parent,Category,Description</FETCH>
+          </COLLECTION>
         </TDLMESSAGE>
       </TDL>
     </DESC>

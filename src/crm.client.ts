@@ -51,3 +51,11 @@ export async function pushPurchaseOrdersToCrm(records: any[]) {
 
   return response.data;
 }
+
+export async function pushCostCentersToCrm(records: any[]) {
+  const response = await client.post("/tally/pull/cost-centers", {
+    records,
+  });
+
+  return response.data;
+}

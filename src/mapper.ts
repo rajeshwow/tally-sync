@@ -41,13 +41,74 @@ function readName(block: string, tag: string) {
   return stripXml(readAttr(block, tag, "NAME") || readTag(block, "NAME"));
 }
 
-function toNumber(value: any) {
-  const cleaned = stripXml(String(value || ""))
+function toNumber(value?: string | number | null) {
+  if (value === undefined || value === null || value === "") return 0;
+
+  const cleaned = String(value)
     .replace(/,/g, "")
     .replace(/[^\d.-]/g, "");
 
   const num = Number(cleaned);
+
   return Number.isFinite(num) ? num : 0;
+}
+
+function parseCostCenterAllocations(block: string) {
+  const allocations: Array<{
+    cost_center_name: string;
+    cost_category?: string | null;
+    amount: number;
+  }> = [];
+
+  const categoryBlocks =
+    block.match(
+      /<CATEGORYALLOCATIONS\.LIST[\s\S]*?<\/CATEGORYALLOCATIONS\.LIST>/gi,
+    ) || [];
+
+  for (const categoryBlock of categoryBlocks) {
+    const category = readTag(categoryBlock, "CATEGORY") || null;
+
+    const ccBlocks =
+      categoryBlock.match(
+        /<COSTCENTREALLOCATIONS\.LIST[\s\S]*?<\/COSTCENTREALLOCATIONS\.LIST>/gi,
+      ) || [];
+
+    for (const ccBlock of ccBlocks) {
+      const name = readTag(ccBlock, "NAME");
+
+      if (!name) continue;
+
+      allocations.push({
+        cost_center_name: name,
+        cost_category: category,
+        amount: Math.abs(toNumber(readTag(ccBlock, "AMOUNT"))),
+      });
+    }
+  }
+
+  return allocations;
+}
+
+function getPrimaryCostCenter(block: string) {
+  const allocations = parseCostCenterAllocations(block);
+
+  if (!allocations.length) {
+    return {
+      cost_center_name: null,
+      cost_category: null,
+      cost_center_amount: 0,
+      cost_center_allocations: [],
+    };
+  }
+
+  const primary = allocations.find((item) => item.amount > 0) || allocations[0];
+
+  return {
+    cost_center_name: primary.cost_center_name,
+    cost_category: primary.cost_category || null,
+    cost_center_amount: primary.amount || 0,
+    cost_center_allocations: allocations,
+  };
 }
 
 function toPositiveNumber(value: any) {
@@ -229,6 +290,36 @@ export function parseLedgers(xml: string) {
       closingBalance: stripXml(readTag(block, "CLOSINGBALANCE")),
     }))
     .filter((x) => x.name);
+}
+
+export function parseCostCenters(xml: string) {
+  const records: any[] = [];
+
+  const blocks = xml.match(/<COSTCENTRE[\s\S]*?<\/COSTCENTRE>/gi) || [];
+
+  for (const block of blocks) {
+    const nameFromAttr = readAttr(block, "COSTCENTRE", "NAME");
+    const nameFromTag = readTag(block, "NAME");
+
+    const name = nameFromAttr || nameFromTag;
+    const costCenter = getPrimaryCostCenter(block);
+
+    if (!name) continue;
+
+    records.push({
+      guid: readTag(block, "GUID") || null,
+      name,
+      cost_center_name: costCenter.cost_center_name,
+      cost_category: costCenter.cost_category,
+      cost_center_amount: costCenter.cost_center_amount,
+      cost_center_allocations: costCenter.cost_center_allocations,
+      parent: readTag(block, "PARENT") || null,
+      category: readTag(block, "CATEGORY") || null,
+      description: readTag(block, "DESCRIPTION") || null,
+    });
+  }
+
+  return records;
 }
 
 export function parseStockItems(xml: string) {
@@ -429,8 +520,132 @@ function extractBlocks(xml: string, tagName: string) {
   return blocks;
 }
 
+function parseVoucherOutstandingRows(voucherBlock: string) {
+  const voucherDate = readTallyDate(voucherBlock, "DATE");
+
+  const voucherNo =
+    stripXml(readTag(voucherBlock, "VOUCHERNUMBER")) ||
+    stripXml(readTag(voucherBlock, "REFERENCE")) ||
+    stripXml(readTag(voucherBlock, "VCHNO"));
+
+  const voucherGuid =
+    stripXml(readTag(voucherBlock, "GUID")) ||
+    stripXml(readTag(voucherBlock, "VOUCHERGUID")) ||
+    null;
+
+  const voucherType =
+    stripXml(readTag(voucherBlock, "VOUCHERTYPENAME")) ||
+    readAttr(voucherBlock, "VOUCHER", "VCHTYPE") ||
+    null;
+
+  const voucherLevelCostCenter = getPrimaryCostCenter(voucherBlock);
+
+  const ledgerBlocks = [
+    ...extractBlocks(voucherBlock, "ALLLEDGERENTRIES.LIST"),
+    ...extractBlocks(voucherBlock, "LEDGERENTRIES.LIST"),
+  ];
+
+  const rows: any[] = [];
+
+  for (const ledgerBlock of ledgerBlocks) {
+    const ledgerName =
+      stripXml(readTag(ledgerBlock, "LEDGERNAME")) ||
+      stripXml(readTag(ledgerBlock, "PARTYLEDGERNAME")) ||
+      stripXml(readTag(voucherBlock, "PARTYLEDGERNAME")) ||
+      stripXml(readTag(voucherBlock, "PARTYNAME"));
+
+    if (!ledgerName) continue;
+
+    const ledgerGuid =
+      stripXml(readTag(ledgerBlock, "LEDGERGUID")) ||
+      stripXml(readTag(ledgerBlock, "PARTYLEDGERGUID")) ||
+      null;
+
+    const ledgerCostCenter = getPrimaryCostCenter(ledgerBlock);
+
+    const costCenter = ledgerCostCenter.cost_center_name
+      ? ledgerCostCenter
+      : voucherLevelCostCenter;
+
+    const billBlocks = extractBlocks(ledgerBlock, "BILLALLOCATIONS.LIST");
+
+    for (const billBlock of billBlocks) {
+      const billRef =
+        stripXml(readTag(billBlock, "NAME")) ||
+        stripXml(readTag(billBlock, "BILLNAME")) ||
+        stripXml(readTag(billBlock, "REFERENCE")) ||
+        voucherNo ||
+        ledgerName;
+
+      const billType =
+        stripXml(readTag(billBlock, "BILLTYPE")) ||
+        stripXml(readTag(billBlock, "BILLCREDITPERIOD")) ||
+        "receivable";
+
+      const amountRaw =
+        stripXml(readTag(billBlock, "AMOUNT")) ||
+        stripXml(readTag(ledgerBlock, "AMOUNT")) ||
+        stripXml(readTag(voucherBlock, "AMOUNT"));
+
+      const billDate =
+        readTallyDate(billBlock, "BILLDATE") ||
+        readTallyDate(billBlock, "DATE") ||
+        voucherDate;
+
+      const dueDate =
+        readTallyDate(billBlock, "BILLDUEDATE") ||
+        readTallyDate(billBlock, "DUEDATE") ||
+        billDate ||
+        voucherDate;
+
+      rows.push({
+        tallyGuid: voucherGuid,
+        ledgerGuid,
+        ledgerName,
+
+        voucherGuid,
+        voucherNumber: voucherNo || billRef,
+        voucherType,
+        voucherDate,
+        dueDate,
+
+        billRef,
+        billType,
+        billAmount: toNumberLike(amountRaw),
+        pendingAmount: toNumberLike(amountRaw),
+        outstandingAmount: toNumberLike(amountRaw),
+
+        costCenterName: costCenter.cost_center_name || null,
+        cost_center_name: costCenter.cost_center_name || null,
+
+        costCategory: costCenter.cost_category || null,
+        cost_category: costCenter.cost_category || null,
+
+        costCenterAmount: costCenter.cost_center_amount || 0,
+        cost_center_amount: costCenter.cost_center_amount || 0,
+
+        costCenterAllocations: costCenter.cost_center_allocations || [],
+        cost_center_allocations: costCenter.cost_center_allocations || [],
+
+        drCr: getDrCr(amountRaw),
+        partyType: null,
+      });
+    }
+  }
+
+  return rows;
+}
+
 export function parseOutstandings(xml: string) {
   const source = String(xml || "");
+
+  const voucherBlocks = extractBlocks(source, "VOUCHER");
+
+  if (voucherBlocks.length) {
+    return voucherBlocks
+      .flatMap((voucherBlock) => parseVoucherOutstandingRows(voucherBlock))
+      .filter((row) => row.ledgerName && row.billRef);
+  }
 
   let blocks = extractBlocks(source, "BILLFIXED");
 
@@ -444,6 +659,8 @@ export function parseOutstandings(xml: string) {
 
   return blocks
     .map((block) => {
+      const costCenter = getPrimaryCostCenter(block);
+
       const ledgerName =
         readTag(block, "BILLPARTY") ||
         readTag(block, "LEDGERNAME") ||
@@ -513,6 +730,7 @@ export function parseOutstandings(xml: string) {
 
         billRef,
         voucherNo: voucherNo || null,
+        voucherNumber: voucherNo || null,
         voucherType: voucherType || null,
 
         voucherDate,
@@ -520,6 +738,19 @@ export function parseOutstandings(xml: string) {
 
         openingAmount,
         pendingAmount,
+        outstandingAmount: pendingAmount,
+
+        costCenterName: costCenter.cost_center_name || null,
+        cost_center_name: costCenter.cost_center_name || null,
+
+        costCategory: costCenter.cost_category || null,
+        cost_category: costCenter.cost_category || null,
+
+        costCenterAmount: costCenter.cost_center_amount || 0,
+        cost_center_amount: costCenter.cost_center_amount || 0,
+
+        costCenterAllocations: costCenter.cost_center_allocations || [],
+        cost_center_allocations: costCenter.cost_center_allocations || [],
 
         overdueDays: toNumberLike(overdueDaysRaw),
 
