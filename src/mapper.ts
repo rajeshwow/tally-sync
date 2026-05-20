@@ -603,6 +603,46 @@ function normalizeLedgerName(value?: string | null) {
     .trim();
 }
 
+function decodeXml(value: string) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim();
+}
+
+export function parseTallyLoadedCompany(xml: string) {
+  const companyBlocks =
+    String(xml || "").match(/<COMPANY[\s\S]*?<\/COMPANY>/gi) || [];
+
+  const companies = companyBlocks
+    .map((block) => {
+      const nameFromAttr = block.match(/NAME="([^"]+)"/i)?.[1] || "";
+      const nameFromTag = readTag(block, "NAME");
+
+      return {
+        name: decodeXml(nameFromAttr || nameFromTag),
+        guid: decodeXml(readTag(block, "GUID")),
+      };
+    })
+    .filter((item) => item.name);
+
+  const preferredCompanyName =
+    process.env.TALLY_COMPANY_NAME?.trim().toLowerCase();
+
+  if (preferredCompanyName) {
+    const matched = companies.find(
+      (company) => company.name.trim().toLowerCase() === preferredCompanyName,
+    );
+
+    if (matched) return matched;
+  }
+
+  return companies[0] || null;
+}
+
 function isNonPartyOutstandingLedger(ledgerName?: string | null) {
   const name = normalizeLedgerName(ledgerName);
 
