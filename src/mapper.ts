@@ -520,6 +520,122 @@ function extractBlocks(xml: string, tagName: string) {
   return blocks;
 }
 
+function normalizeText(value?: string | null) {
+  return stripXml(String(value || ""))
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toSignedNumberLike(value?: string | number | null) {
+  if (value === undefined || value === null || value === "") return 0;
+
+  const cleaned = String(value)
+    .replace(/,/g, "")
+    .replace(/[^\d.-]/g, "");
+
+  const num = Number(cleaned);
+
+  return Number.isFinite(num) ? num : 0;
+}
+
+function toAbsNumberLike(value?: string | number | null) {
+  return Math.abs(toSignedNumberLike(value));
+}
+
+function getVoucherNature(voucherType?: string | null) {
+  const type = normalizeText(voucherType);
+
+  if (type === "sales") {
+    return {
+      billType: "receivable",
+      effect: "base",
+    };
+  }
+
+  if (type === "receipt") {
+    return {
+      billType: "receivable",
+      effect: "adjustment",
+    };
+  }
+
+  if (type === "purchase") {
+    return {
+      billType: "payable",
+      effect: "base",
+    };
+  }
+
+  if (type === "payment") {
+    return {
+      billType: "payable",
+      effect: "adjustment",
+    };
+  }
+
+  return null;
+}
+
+function isSameName(a?: string | null, b?: string | null) {
+  const left = normalizeText(a);
+  const right = normalizeText(b);
+
+  return Boolean(left && right && left === right);
+}
+
+function buildOutstandingKey(input: {
+  billType: string;
+  ledgerName: string;
+  billRef: string;
+}) {
+  return [
+    normalizeText(input.billType),
+    normalizeText(input.ledgerName),
+    normalizeText(input.billRef),
+  ].join("::");
+}
+
+function normalizeLedgerName(value?: string | null) {
+  return stripXml(String(value || ""))
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isNonPartyOutstandingLedger(ledgerName?: string | null) {
+  const name = normalizeLedgerName(ledgerName);
+
+  if (!name) return true;
+
+  const blockedExactNames = new Set([
+    "sales account",
+    "purchase account",
+    "cash",
+    "cash in hand",
+    "round off",
+  ]);
+
+  if (blockedExactNames.has(name)) return true;
+
+  const blockedKeywords = [
+    "gst",
+    "cgst",
+    "sgst",
+    "igst",
+    "tax",
+    "duties",
+    "bank",
+    "discount",
+    "freight",
+    "round",
+    "sales",
+    "purchase",
+  ];
+
+  return blockedKeywords.some((keyword) => name.includes(keyword));
+}
+
 function parseVoucherOutstandingRows(voucherBlock: string) {
   const voucherDate = readTallyDate(voucherBlock, "DATE");
 
@@ -538,27 +654,61 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
     readAttr(voucherBlock, "VOUCHER", "VCHTYPE") ||
     null;
 
+  const nature = getVoucherNature(voucherType);
+
+  if (!nature) {
+    return [];
+  }
+
+  const partyLedgerName =
+    stripXml(readTag(voucherBlock, "PARTYLEDGERNAME")) ||
+    stripXml(readTag(voucherBlock, "PARTYNAME")) ||
+    stripXml(readTag(voucherBlock, "BASICBUYERNAME")) ||
+    stripXml(readTag(voucherBlock, "BASICSUPPLIERNAME"));
+
+  const partyLedgerGuid =
+    stripXml(readTag(voucherBlock, "PARTYLEDGERGUID")) || null;
+
   const voucherLevelCostCenter = getPrimaryCostCenter(voucherBlock);
 
-  const ledgerBlocks = [
-    ...extractBlocks(voucherBlock, "ALLLEDGERENTRIES.LIST"),
-    ...extractBlocks(voucherBlock, "LEDGERENTRIES.LIST"),
-  ];
+  /**
+   * IMPORTANT:
+   * Do not combine ALLLEDGERENTRIES and LEDGERENTRIES.
+   * Some Tally XML exports contain same ledger in both.
+   * Combining both causes double outstanding.
+   */
+  const allLedgerEntries = extractBlocks(voucherBlock, "ALLLEDGERENTRIES.LIST");
+  const normalLedgerEntries = extractBlocks(voucherBlock, "LEDGERENTRIES.LIST");
+
+  const ledgerBlocks = allLedgerEntries.length
+    ? allLedgerEntries
+    : normalLedgerEntries;
 
   const rows: any[] = [];
 
   for (const ledgerBlock of ledgerBlocks) {
     const ledgerName =
-      stripXml(readTag(ledgerBlock, "LEDGERNAME")) ||
-      stripXml(readTag(ledgerBlock, "PARTYLEDGERNAME")) ||
-      stripXml(readTag(voucherBlock, "PARTYLEDGERNAME")) ||
-      stripXml(readTag(voucherBlock, "PARTYNAME"));
+      stripXml(readTag(ledgerBlock, "LEDGERNAME")) || partyLedgerName;
 
     if (!ledgerName) continue;
+
+    if (isNonPartyOutstandingLedger(ledgerName)) {
+      continue;
+    }
+
+    // Only party ledger bill allocations should be considered.
+    if (partyLedgerName && !isSameName(ledgerName, partyLedgerName)) {
+      continue;
+    }
+
+    const billBlocks = extractBlocks(ledgerBlock, "BILLALLOCATIONS.LIST");
+
+    if (!billBlocks.length) continue;
 
     const ledgerGuid =
       stripXml(readTag(ledgerBlock, "LEDGERGUID")) ||
       stripXml(readTag(ledgerBlock, "PARTYLEDGERGUID")) ||
+      partyLedgerGuid ||
       null;
 
     const ledgerCostCenter = getPrimaryCostCenter(ledgerBlock);
@@ -567,25 +717,22 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
       ? ledgerCostCenter
       : voucherLevelCostCenter;
 
-    const billBlocks = extractBlocks(ledgerBlock, "BILLALLOCATIONS.LIST");
-
     for (const billBlock of billBlocks) {
       const billRef =
         stripXml(readTag(billBlock, "NAME")) ||
         stripXml(readTag(billBlock, "BILLNAME")) ||
         stripXml(readTag(billBlock, "REFERENCE")) ||
-        voucherNo ||
-        ledgerName;
+        voucherNo;
 
-      const billType =
-        stripXml(readTag(billBlock, "BILLTYPE")) ||
-        stripXml(readTag(billBlock, "BILLCREDITPERIOD")) ||
-        "receivable";
+      if (!billRef) continue;
 
       const amountRaw =
         stripXml(readTag(billBlock, "AMOUNT")) ||
-        stripXml(readTag(ledgerBlock, "AMOUNT")) ||
-        stripXml(readTag(voucherBlock, "AMOUNT"));
+        stripXml(readTag(ledgerBlock, "AMOUNT"));
+
+      const amount = toAbsNumberLike(amountRaw);
+
+      if (amount <= 0) continue;
 
       const billDate =
         readTallyDate(billBlock, "BILLDATE") ||
@@ -605,15 +752,16 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
 
         voucherGuid,
         voucherNumber: voucherNo || billRef,
+        voucherNo: voucherNo || billRef,
         voucherType,
         voucherDate,
         dueDate,
 
         billRef,
-        billType,
-        billAmount: toNumberLike(amountRaw),
-        pendingAmount: toNumberLike(amountRaw),
-        outstandingAmount: toNumberLike(amountRaw),
+        billType: nature.billType,
+
+        effect: nature.effect,
+        amount,
 
         costCenterName: costCenter.cost_center_name || null,
         cost_center_name: costCenter.cost_center_name || null,
@@ -636,15 +784,164 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
   return rows;
 }
 
+function parseVoucherItems(voucherBlock: string) {
+  const itemBlocks =
+    voucherBlock.match(
+      /<ALLINVENTORYENTRIES\.LIST\b[\s\S]*?<\/ALLINVENTORYENTRIES\.LIST>/gi,
+    ) || [];
+
+  return itemBlocks
+    .map((itemBlock, index) => {
+      const stockItemName =
+        stripXml(readTag(itemBlock, "STOCKITEMNAME")) ||
+        stripXml(readTag(itemBlock, "NAME"));
+
+      const actualQtyRaw = stripXml(readTag(itemBlock, "ACTUALQTY"));
+      const billedQtyRaw = stripXml(readTag(itemBlock, "BILLEDQTY"));
+      const rateRaw = stripXml(readTag(itemBlock, "RATE"));
+      const amountRaw = stripXml(readTag(itemBlock, "AMOUNT"));
+
+      const quantity =
+        parseQty(billedQtyRaw) ||
+        parseQty(actualQtyRaw) ||
+        toPositiveNumber(amountRaw);
+
+      const rate = toPositiveNumber(rateRaw);
+      const amount = toPositiveNumber(amountRaw);
+
+      const hsnCode =
+        readHsnCode(itemBlock) ||
+        stripXml(readTag(itemBlock, "GSTHSNNAME")) ||
+        "NA";
+
+      const gstRate = readGstRate(itemBlock);
+
+      return {
+        lineNo: index + 1,
+
+        stockItemName,
+        stockItemGuid:
+          stripXml(readTag(itemBlock, "STOCKITEMGUID")) ||
+          stripXml(readTag(itemBlock, "GUID")) ||
+          null,
+
+        description:
+          stripXml(readTag(itemBlock, "DESCRIPTION")) ||
+          stripXml(readTag(itemBlock, "NARRATION")) ||
+          stockItemName,
+
+        actualQty: actualQtyRaw,
+        billedQty: billedQtyRaw,
+
+        quantity,
+        rate,
+        amount,
+
+        unit:
+          stripXml(readTag(itemBlock, "UNIT")) ||
+          stripXml(readTag(itemBlock, "BASEUNITS")) ||
+          "",
+
+        hsnCode,
+        gstRate,
+      };
+    })
+    .filter((item) => item.stockItemName);
+}
+
 export function parseOutstandings(xml: string) {
   const source = String(xml || "");
 
   const voucherBlocks = extractBlocks(source, "VOUCHER");
 
   if (voucherBlocks.length) {
-    return voucherBlocks
+    const rawRows = voucherBlocks
       .flatMap((voucherBlock) => parseVoucherOutstandingRows(voucherBlock))
-      .filter((row) => row.ledgerName && row.billRef);
+      .filter((row) => row.ledgerName && row.billRef && row.amount > 0);
+
+    const grouped = new Map<string, any>();
+
+    for (const row of rawRows) {
+      const key = buildOutstandingKey({
+        billType: row.billType,
+        ledgerName: row.ledgerName,
+        billRef: row.billRef,
+      });
+
+      if (!grouped.has(key)) {
+        grouped.set(key, {
+          ...row,
+          baseAmount: 0,
+          adjustmentAmount: 0,
+        });
+      }
+
+      const current = grouped.get(key);
+
+      if (row.effect === "base") {
+        current.baseAmount += row.amount;
+
+        // Keep bill details from Sales/Purchase voucher.
+        current.tallyGuid = row.tallyGuid;
+        current.voucherGuid = row.voucherGuid;
+        current.voucherNumber = row.voucherNumber;
+        current.voucherNo = row.voucherNo;
+        current.voucherType = row.voucherType;
+        current.voucherDate = row.voucherDate;
+        current.dueDate = row.dueDate;
+        current.ledgerGuid = row.ledgerGuid || current.ledgerGuid;
+
+        current.costCenterName = row.costCenterName || current.costCenterName;
+        current.cost_center_name =
+          row.cost_center_name || current.cost_center_name;
+
+        current.costCategory = row.costCategory || current.costCategory;
+        current.cost_category = row.cost_category || current.cost_category;
+
+        current.costCenterAmount =
+          row.costCenterAmount || current.costCenterAmount;
+
+        current.cost_center_amount =
+          row.cost_center_amount || current.cost_center_amount;
+
+        current.costCenterAllocations =
+          row.costCenterAllocations || current.costCenterAllocations;
+
+        current.cost_center_allocations =
+          row.cost_center_allocations || current.cost_center_allocations;
+      }
+
+      if (row.effect === "adjustment") {
+        current.adjustmentAmount += row.amount;
+      }
+    }
+
+    return Array.from(grouped.values())
+      .map((row) => {
+        const baseAmount = Number(row.baseAmount || 0);
+        const adjustmentAmount = Number(row.adjustmentAmount || 0);
+
+        const pendingAmount = Math.max(0, baseAmount - adjustmentAmount);
+
+        return {
+          ...row,
+
+          // Tally Bills Receivable screen shows pending amount.
+          billAmount: pendingAmount,
+          pendingAmount,
+          outstandingAmount: pendingAmount,
+
+          openingAmount: baseAmount,
+          adjustmentAmount,
+        };
+      })
+      .filter(
+        (row) =>
+          row.ledgerName &&
+          row.billRef &&
+          row.baseAmount > 0 &&
+          row.pendingAmount > 0,
+      );
   }
 
   let blocks = extractBlocks(source, "BILLFIXED");
@@ -712,8 +1009,8 @@ export function parseOutstandings(xml: string) {
       const overdueDaysRaw =
         readTag(block, "BILLOVERDUE") || readTag(block, "OVERDUEDAYS");
 
-      const openingAmount = toNumberLike(openingAmountRaw);
-      const pendingAmount = toNumberLike(pendingAmountRaw);
+      const openingAmount = toAbsNumberLike(openingAmountRaw);
+      const pendingAmount = toAbsNumberLike(pendingAmountRaw);
 
       return {
         ledgerName,
@@ -736,7 +1033,9 @@ export function parseOutstandings(xml: string) {
         voucherDate,
         dueDate,
 
+        billType: "receivable",
         openingAmount,
+        billAmount: pendingAmount,
         pendingAmount,
         outstandingAmount: pendingAmount,
 
@@ -752,79 +1051,20 @@ export function parseOutstandings(xml: string) {
         costCenterAllocations: costCenter.cost_center_allocations || [],
         cost_center_allocations: costCenter.cost_center_allocations || [],
 
-        overdueDays: toNumberLike(overdueDaysRaw),
+        overdueDays: toAbsNumberLike(overdueDaysRaw),
 
         drCr: getDrCr(pendingAmountRaw || openingAmountRaw),
 
         partyType: null,
       };
     })
-    .filter((row) => row.ledgerName && row.billRef);
-}
-
-function parseVoucherItems(voucherBlock: string) {
-  const itemBlocks =
-    voucherBlock.match(
-      /<ALLINVENTORYENTRIES\.LIST\b[\s\S]*?<\/ALLINVENTORYENTRIES\.LIST>/gi,
-    ) || [];
-
-  return itemBlocks
-    .map((itemBlock, index) => {
-      const stockItemName =
-        stripXml(readTag(itemBlock, "STOCKITEMNAME")) ||
-        stripXml(readTag(itemBlock, "NAME"));
-
-      const actualQtyRaw = stripXml(readTag(itemBlock, "ACTUALQTY"));
-      const billedQtyRaw = stripXml(readTag(itemBlock, "BILLEDQTY"));
-      const rateRaw = stripXml(readTag(itemBlock, "RATE"));
-      const amountRaw = stripXml(readTag(itemBlock, "AMOUNT"));
-
-      const quantity =
-        parseQty(billedQtyRaw) ||
-        parseQty(actualQtyRaw) ||
-        toPositiveNumber(amountRaw);
-
-      const rate = toPositiveNumber(rateRaw);
-      const amount = toPositiveNumber(amountRaw);
-
-      const hsnCode =
-        readHsnCode(itemBlock) ||
-        stripXml(readTag(itemBlock, "GSTHSNNAME")) ||
-        "NA";
-
-      const gstRate = readGstRate(itemBlock);
-
-      return {
-        lineNo: index + 1,
-
-        stockItemName,
-        stockItemGuid:
-          stripXml(readTag(itemBlock, "STOCKITEMGUID")) ||
-          stripXml(readTag(itemBlock, "GUID")) ||
-          null,
-
-        description:
-          stripXml(readTag(itemBlock, "DESCRIPTION")) ||
-          stripXml(readTag(itemBlock, "NARRATION")) ||
-          stockItemName,
-
-        actualQty: actualQtyRaw,
-        billedQty: billedQtyRaw,
-
-        quantity,
-        rate,
-        amount,
-
-        unit:
-          stripXml(readTag(itemBlock, "UNIT")) ||
-          stripXml(readTag(itemBlock, "BASEUNITS")) ||
-          "",
-
-        hsnCode,
-        gstRate,
-      };
-    })
-    .filter((item) => item.stockItemName);
+    .filter(
+      (row) =>
+        row.ledgerName &&
+        row.billRef &&
+        row.pendingAmount > 0 &&
+        !isNonPartyOutstandingLedger(row.ledgerName),
+    );
 }
 
 function parseVoucherOrders(xml: string, expectedVoucherType: string) {
