@@ -28,12 +28,14 @@ function stripXml(value: string) {
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
+    .replace(/&#x?[0-9a-fA-F]+;/g, "") // removes all numeric XML entities like &#4;, &#x04;
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // removes control chars
     .replace(/<[^>]+>/g, "")
-    .replace(/&#4;/g, "")
     .replace(/Not Applicable/gi, "")
     .replace(/Not Found/gi, "")
     .replace(/As per Company\/Stock Group/gi, "")
     .replace(/Not Available/gi, "")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
@@ -66,7 +68,7 @@ function parseCostCenterAllocations(block: string) {
     ) || [];
 
   for (const categoryBlock of categoryBlocks) {
-    const category = readTag(categoryBlock, "CATEGORY") || null;
+    const category = stripXml(readTag(categoryBlock, "CATEGORY")) || null;
 
     const ccBlocks =
       categoryBlock.match(
@@ -74,7 +76,7 @@ function parseCostCenterAllocations(block: string) {
       ) || [];
 
     for (const ccBlock of ccBlocks) {
-      const name = readTag(ccBlock, "NAME");
+      const name = stripXml(readTag(ccBlock, "NAME"));
 
       if (!name) continue;
 
@@ -295,11 +297,12 @@ export function parseLedgers(xml: string) {
 export function parseCostCenters(xml: string) {
   const records: any[] = [];
 
-  const blocks = xml.match(/<COSTCENTRE[\s\S]*?<\/COSTCENTRE>/gi) || [];
+  const blocks =
+    String(xml || "").match(/<COSTCENTRE\b[\s\S]*?<\/COSTCENTRE>/gi) || [];
 
   for (const block of blocks) {
-    const nameFromAttr = readAttr(block, "COSTCENTRE", "NAME");
-    const nameFromTag = readTag(block, "NAME");
+    const nameFromAttr = stripXml(readAttr(block, "COSTCENTRE", "NAME"));
+    const nameFromTag = stripXml(readTag(block, "NAME"));
 
     const name = nameFromAttr || nameFromTag;
     const costCenter = getPrimaryCostCenter(block);
@@ -307,15 +310,20 @@ export function parseCostCenters(xml: string) {
     if (!name) continue;
 
     records.push({
-      guid: readTag(block, "GUID") || null,
+      guid: stripXml(readTag(block, "GUID")) || null,
+      masterId: stripXml(readTag(block, "MASTERID")) || null,
+      alterId: stripXml(readTag(block, "ALTERID")) || null,
+
       name,
-      cost_center_name: costCenter.cost_center_name,
-      cost_category: costCenter.cost_category,
+
+      cost_center_name: stripXml(costCenter.cost_center_name || ""),
+      cost_category: stripXml(costCenter.cost_category || ""),
       cost_center_amount: costCenter.cost_center_amount,
       cost_center_allocations: costCenter.cost_center_allocations,
-      parent: readTag(block, "PARENT") || null,
-      category: readTag(block, "CATEGORY") || null,
-      description: readTag(block, "DESCRIPTION") || null,
+
+      parent: stripXml(readTag(block, "PARENT")) || null,
+      category: stripXml(readTag(block, "CATEGORY")) || null,
+      description: stripXml(readTag(block, "DESCRIPTION")) || null,
     });
   }
 

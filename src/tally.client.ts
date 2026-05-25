@@ -13,7 +13,30 @@ export async function postToTally(xml: string) {
   return response.data;
 }
 
-export async function fetchLedgersXml() {
+function escapeXml(value: string) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildStaticVariables(companyName?: string | null, extra?: string) {
+  return `
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        ${
+          companyName
+            ? `<SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>`
+            : ""
+        }
+        ${extra || ""}
+      </STATICVARIABLES>
+`;
+}
+
+export async function fetchLedgersXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -24,6 +47,7 @@ export async function fetchLedgersXml() {
   </HEADER>
   <BODY>
     <DESC>
+      ${buildStaticVariables(companyName)}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Ledgers" ISMODIFY="No">
@@ -40,7 +64,7 @@ export async function fetchLedgersXml() {
   return postToTally(xml);
 }
 
-export async function fetchStockItemsXml() {
+export async function fetchStockItemsXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -51,6 +75,7 @@ export async function fetchStockItemsXml() {
   </HEADER>
   <BODY>
     <DESC>
+      ${buildStaticVariables(companyName)}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Stock Items" ISMODIFY="No">
@@ -67,7 +92,7 @@ export async function fetchStockItemsXml() {
   return postToTally(xml);
 }
 
-export async function fetchOutstandingsXml() {
+export async function fetchOutstandingsXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -78,11 +103,13 @@ export async function fetchOutstandingsXml() {
   </HEADER>
   <BODY>
     <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${buildStaticVariables(
+        companyName,
+        `
         <SVFROMDATE>20260401</SVFROMDATE>
         <SVTODATE>20270331</SVTODATE>
-      </STATICVARIABLES>
+        `,
+      )}
 
       <TDL>
         <TDLMESSAGE>
@@ -124,7 +151,7 @@ export async function fetchOutstandingsXml() {
   return postToTally(xml);
 }
 
-export async function fetchSalesOrdersXml() {
+export async function fetchSalesOrdersXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -135,11 +162,13 @@ export async function fetchSalesOrdersXml() {
   </HEADER>
   <BODY>
     <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${buildStaticVariables(
+        companyName,
+        `
         <SVFROMDATE>20260401</SVFROMDATE>
         <SVTODATE>20270331</SVTODATE>
-      </STATICVARIABLES>
+        `,
+      )}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Sales Register" ISMODIFY="No">
@@ -182,7 +211,7 @@ export async function fetchSalesOrdersXml() {
   return postToTally(xml);
 }
 
-export async function fetchPurchaseOrdersXml() {
+export async function fetchPurchaseOrdersXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -193,11 +222,13 @@ export async function fetchPurchaseOrdersXml() {
   </HEADER>
   <BODY>
     <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      ${buildStaticVariables(
+        companyName,
+        `
         <SVFROMDATE>20260401</SVFROMDATE>
         <SVTODATE>20270331</SVTODATE>
-      </STATICVARIABLES>
+        `,
+      )}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Purchase Register" ISMODIFY="No">
@@ -240,7 +271,7 @@ export async function fetchPurchaseOrdersXml() {
   return postToTally(xml);
 }
 
-export async function fetchCostCentersXml() {
+export async function fetchCostCentersXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -251,9 +282,7 @@ export async function fetchCostCentersXml() {
   </HEADER>
   <BODY>
     <DESC>
-      <STATICVARIABLES>
-        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-      </STATICVARIABLES>
+      ${buildStaticVariables(companyName)}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Cost Centers" ISMODIFY="No">
@@ -277,7 +306,7 @@ export async function fetchTallyCompaniesXml() {
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
     <TYPE>Collection</TYPE>
-    <ID>Loaded Companies</ID>
+    <ID>CRM Loaded Companies</ID>
   </HEADER>
   <BODY>
     <DESC>
@@ -286,10 +315,9 @@ export async function fetchTallyCompaniesXml() {
       </STATICVARIABLES>
       <TDL>
         <TDLMESSAGE>
-          <COLLECTION NAME="Loaded Companies" ISMODIFY="No">
+          <COLLECTION NAME="CRM Loaded Companies" ISMODIFY="No">
             <TYPE>Company</TYPE>
-            <NATIVEMETHOD>Name</NATIVEMETHOD>
-            <NATIVEMETHOD>GUID</NATIVEMETHOD>
+            <FETCH>Name,Guid,StartingFrom,BooksFrom,CountryOfResidence,StateName</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
