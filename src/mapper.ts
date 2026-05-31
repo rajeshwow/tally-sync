@@ -132,6 +132,40 @@ function readFirstAvailableTag(block: string, tags: string[]) {
   return "";
 }
 
+function extractCrmSalesOrderRef(value?: string | null) {
+  const text = stripXml(String(value || "")).trim();
+
+  if (!text) return "";
+
+  const directSoMatch = text.match(/\bSO-\d+\b/i);
+  if (directSoMatch?.[0]) {
+    return directSoMatch[0].toUpperCase();
+  }
+
+  return text
+    .replace(/^crm\s*so\s*no\s*[:#-]?\s*/i, "")
+    .replace(/^sales\s*order\s*[:#-]?\s*/i, "")
+    .trim();
+}
+
+function readVoucherReferenceNumber(block: string) {
+  const directReference = readFirstAvailableTag(block, [
+    "REFERENCE",
+    "BASICORDERREF",
+    "BASICBUYERORDERNO",
+    "ORDERREFERENCE",
+    "ORDERREF",
+  ]);
+
+  if (directReference) {
+    return extractCrmSalesOrderRef(directReference);
+  }
+
+  const narration = stripXml(readTag(block, "NARRATION"));
+
+  return extractCrmSalesOrderRef(narration);
+}
+
 function readFirstAvailableNumber(block: string, tags: string[]) {
   for (const tag of tags) {
     const value = stripXml(readTag(block, tag));
@@ -1115,6 +1149,135 @@ export function parseOutstandings(xml: string) {
     );
 }
 
+function readBlocks(xml: string, tagName: string) {
+  const re = new RegExp(`<${tagName}\\b[\\s\\S]*?<\\/${tagName}>`, "gi");
+  return String(xml || "").match(re) || [];
+}
+
+function parseVoucherCostCenters(voucherBlock: string) {
+  const allocations: Array<{
+    guid: string | null;
+    name: string;
+    category: string | null;
+    amount: number;
+  }> = [];
+
+  const categoryBlocks = readBlocks(voucherBlock, "CATEGORYALLOCATIONS.LIST");
+
+  for (const categoryBlock of categoryBlocks) {
+    const category =
+      stripXml(readTag(categoryBlock, "CATEGORY")) ||
+      stripXml(readTag(categoryBlock, "NAME")) ||
+      null;
+
+    const costCenterBlocks = readBlocks(
+      categoryBlock,
+      "COSTCENTREALLOCATIONS.LIST",
+    );
+
+    for (const ccBlock of costCenterBlocks) {
+      const name =
+        stripXml(readTag(ccBlock, "NAME")) ||
+        stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
+        stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
+        "";
+
+      if (!name) continue;
+
+      const guid =
+        stripXml(readTag(ccBlock, "GUID")) ||
+        stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
+        stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
+        null;
+
+      const amount = toPositiveNumber(readTag(ccBlock, "AMOUNT"));
+
+      allocations.push({
+        guid,
+        name,
+        category,
+        amount,
+      });
+    }
+  }
+
+  // fallback: agar Tally XML me direct COSTCENTREALLOCATIONS.LIST aaye
+  if (!allocations.length) {
+    const directCostCenterBlocks = readBlocks(
+      voucherBlock,
+      "COSTCENTREALLOCATIONS.LIST",
+    );
+
+    for (const ccBlock of directCostCenterBlocks) {
+      const name =
+        stripXml(readTag(ccBlock, "NAME")) ||
+        stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
+        stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
+        "";
+
+      if (!name) continue;
+
+      const guid =
+        stripXml(readTag(ccBlock, "GUID")) ||
+        stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
+        stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
+        null;
+
+      const category =
+        stripXml(readTag(ccBlock, "CATEGORY")) ||
+        stripXml(readTag(ccBlock, "COSTCATEGORY")) ||
+        null;
+
+      const amount = toPositiveNumber(readTag(ccBlock, "AMOUNT"));
+
+      allocations.push({
+        guid,
+        name,
+        category,
+        amount,
+      });
+    }
+  }
+
+  // duplicate same name/category ko merge kar do
+  const merged = new Map<
+    string,
+    {
+      guid: string | null;
+      name: string;
+      category: string | null;
+      amount: number;
+    }
+  >();
+
+  for (const row of allocations) {
+    const key = `${row.guid || ""}::${row.name.toLowerCase()}::${row.category || ""}`;
+
+    const existing = merged.get(key);
+
+    if (existing) {
+      existing.amount += row.amount;
+    } else {
+      merged.set(key, { ...row });
+    }
+  }
+
+  const finalAllocations = Array.from(merged.values());
+
+  const primary =
+    finalAllocations.find((x) => Number(x.amount || 0) > 0) ||
+    finalAllocations[0] ||
+    null;
+
+  return {
+    costCenterGuid: primary?.guid || null,
+    costCenterName: primary?.name || null,
+    costCategory: primary?.category || null,
+    costCenterAmount: primary?.amount || 0,
+    costCenterAllocations: finalAllocations,
+  };
+}
+
 function parseVoucherOrders(xml: string, expectedVoucherType: string) {
   const source = String(xml || "");
 
@@ -1149,6 +1312,7 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
       );
 
       const voucherAmount = toPositiveNumber(readTag(block, "AMOUNT"));
+      const costCenterData = parseVoucherCostCenters(block);
 
       return {
         guid: stripXml(readTag(block, "GUID")),
@@ -1170,9 +1334,12 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
           stripXml(readTag(block, "LEDGERGUID")) ||
           null,
 
-        referenceNumber:
-          stripXml(readTag(block, "REFERENCE")) ||
-          stripXml(readTag(block, "BASICORDERREF")) ||
+        referenceNumber: readVoucherReferenceNumber(block),
+        basicOrderRef: stripXml(readTag(block, "BASICORDERREF")) || "",
+        basicBuyerOrderNo: stripXml(readTag(block, "BASICBUYERORDERNO")) || "",
+        orderRef:
+          stripXml(readTag(block, "ORDERREFERENCE")) ||
+          stripXml(readTag(block, "ORDERREF")) ||
           "",
 
         dueDate: normalizeDate(stripXml(readTag(block, "BASICDUEDATEOFPYMT"))),
@@ -1182,6 +1349,17 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
         totalAmount: voucherAmount || itemsTotal,
 
         items,
+        costCenterGuid: costCenterData.costCenterGuid,
+        costCenterName: costCenterData.costCenterName,
+        costCategory: costCenterData.costCategory,
+        costCenterAmount: costCenterData.costCenterAmount,
+        costCenterAllocations: costCenterData.costCenterAllocations,
+
+        cost_center_guid: costCenterData.costCenterGuid,
+        cost_center_name: costCenterData.costCenterName,
+        cost_category: costCenterData.costCategory,
+        cost_center_amount: costCenterData.costCenterAmount,
+        cost_center_allocations: costCenterData.costCenterAllocations,
       };
     })
     .filter(Boolean);
