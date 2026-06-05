@@ -1,13 +1,24 @@
 import axios from "axios";
 
-const TALLY_URL = process.env.TALLY_URL || "http://localhost:9000";
+const TALLY_URL = process.env.TALLY_URL;
+
+if (!TALLY_URL) {
+  throw new Error("[TALLY CLIENT] TALLY_URL is missing in .env");
+}
+
+export type TallyDateRange = {
+  fromDate: string; // YYYYMMDD
+  toDate: string; // YYYYMMDD
+};
 
 export async function postToTally(xml: string) {
   const response = await axios.post(TALLY_URL, xml, {
     headers: {
       "Content-Type": "text/xml",
     },
-    timeout: 30000,
+    timeout: 120000,
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
   });
 
   return response.data;
@@ -33,6 +44,17 @@ function buildStaticVariables(companyName?: string | null, extra?: string) {
         }
         ${extra || ""}
       </STATICVARIABLES>
+`;
+}
+
+function buildDateRangeVariables(dateRange?: TallyDateRange) {
+  if (!dateRange?.fromDate || !dateRange?.toDate) {
+    return "";
+  }
+
+  return `
+        <SVFROMDATE>${escapeXml(dateRange.fromDate)}</SVFROMDATE>
+        <SVTODATE>${escapeXml(dateRange.toDate)}</SVTODATE>
 `;
 }
 
@@ -92,7 +114,10 @@ export async function fetchStockItemsXml(companyName?: string) {
   return postToTally(xml);
 }
 
-export async function fetchOutstandingsXml(companyName?: string) {
+export async function fetchOutstandingsXml(
+  companyName?: string,
+  dateRange?: TallyDateRange,
+) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -103,14 +128,7 @@ export async function fetchOutstandingsXml(companyName?: string) {
   </HEADER>
   <BODY>
     <DESC>
-      ${buildStaticVariables(
-        companyName,
-        `
-        <SVFROMDATE>20260401</SVFROMDATE>
-        <SVTODATE>20270331</SVTODATE>
-        `,
-      )}
-
+      ${buildStaticVariables(companyName, buildDateRangeVariables(dateRange))}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Outstanding Vouchers" ISMODIFY="No">
@@ -151,7 +169,10 @@ export async function fetchOutstandingsXml(companyName?: string) {
   return postToTally(xml);
 }
 
-export async function fetchSalesOrdersXml(companyName?: string) {
+export async function fetchSalesOrdersXml(
+  companyName?: string,
+  dateRange?: TallyDateRange,
+) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -162,13 +183,7 @@ export async function fetchSalesOrdersXml(companyName?: string) {
   </HEADER>
   <BODY>
     <DESC>
-      ${buildStaticVariables(
-        companyName,
-        `
-        <SVFROMDATE>20260401</SVFROMDATE>
-        <SVTODATE>20270331</SVTODATE>
-        `,
-      )}
+      ${buildStaticVariables(companyName, buildDateRangeVariables(dateRange))}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Sales Register" ISMODIFY="No">
@@ -211,7 +226,10 @@ export async function fetchSalesOrdersXml(companyName?: string) {
   return postToTally(xml);
 }
 
-export async function fetchPurchaseOrdersXml(companyName?: string) {
+export async function fetchPurchaseOrdersXml(
+  companyName?: string,
+  dateRange?: TallyDateRange,
+) {
   const xml = `
 <ENVELOPE>
   <HEADER>
@@ -222,13 +240,7 @@ export async function fetchPurchaseOrdersXml(companyName?: string) {
   </HEADER>
   <BODY>
     <DESC>
-      ${buildStaticVariables(
-        companyName,
-        `
-        <SVFROMDATE>20260401</SVFROMDATE>
-        <SVTODATE>20270331</SVTODATE>
-        `,
-      )}
+      ${buildStaticVariables(companyName, buildDateRangeVariables(dateRange))}
       <TDL>
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Purchase Register" ISMODIFY="No">

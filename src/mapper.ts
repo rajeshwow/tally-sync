@@ -859,6 +859,35 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
 
         drCr: getDrCr(amountRaw),
         partyType: null,
+        voucherKey: stripXml(readTag(voucherBlock, "VOUCHERKEY")) || null,
+        voucher_key: stripXml(readTag(voucherBlock, "VOUCHERKEY")) || null,
+
+        masterId: stripXml(readTag(voucherBlock, "MASTERID")) || null,
+        master_id: stripXml(readTag(voucherBlock, "MASTERID")) || null,
+
+        alterId: stripXml(readTag(voucherBlock, "ALTERID")) || null,
+        alter_id: stripXml(readTag(voucherBlock, "ALTERID")) || null,
+
+        tally_guid: voucherGuid,
+
+        ledger_guid: ledgerGuid,
+        ledger_name: ledgerName,
+
+        voucher_guid: voucherGuid,
+        voucher_number: voucherNo || billRef,
+        voucher_no: voucherNo || billRef,
+
+        voucherTypeName: voucherType,
+        voucher_type_name: voucherType,
+
+        voucher_date: voucherDate,
+        due_date: dueDate,
+
+        bill_ref: billRef,
+        bill_type: nature.billType,
+
+        rawTallyData: voucherBlock,
+        raw_tally_data: voucherBlock,
       });
     }
   }
@@ -867,10 +896,19 @@ function parseVoucherOutstandingRows(voucherBlock: string) {
 }
 
 function parseVoucherItems(voucherBlock: string) {
-  const itemBlocks =
+  const allInventoryBlocks =
     voucherBlock.match(
       /<ALLINVENTORYENTRIES\.LIST\b[\s\S]*?<\/ALLINVENTORYENTRIES\.LIST>/gi,
     ) || [];
+
+  const normalInventoryBlocks =
+    voucherBlock.match(
+      /<INVENTORYENTRIES\.LIST\b[\s\S]*?<\/INVENTORYENTRIES\.LIST>/gi,
+    ) || [];
+
+  const itemBlocks = allInventoryBlocks.length
+    ? allInventoryBlocks
+    : normalInventoryBlocks;
 
   return itemBlocks
     .map((itemBlock, index) => {
@@ -898,14 +936,26 @@ function parseVoucherItems(voucherBlock: string) {
 
       const gstRate = readGstRate(itemBlock);
 
+      const unit =
+        stripXml(readTag(itemBlock, "UNIT")) ||
+        stripXml(readTag(itemBlock, "BASEUNITS")) ||
+        stripXml(readTag(itemBlock, "STOCKITEMBASEUNITS")) ||
+        "";
+
+      const stockItemGuid =
+        stripXml(readTag(itemBlock, "STOCKITEMGUID")) ||
+        stripXml(readTag(itemBlock, "GUID")) ||
+        null;
+
       return {
         lineNo: index + 1,
+        line_no: index + 1,
 
         stockItemName,
-        stockItemGuid:
-          stripXml(readTag(itemBlock, "STOCKITEMGUID")) ||
-          stripXml(readTag(itemBlock, "GUID")) ||
-          null,
+        stock_item_name: stockItemName,
+
+        stockItemGuid,
+        stock_item_guid: stockItemGuid,
 
         description:
           stripXml(readTag(itemBlock, "DESCRIPTION")) ||
@@ -913,19 +963,30 @@ function parseVoucherItems(voucherBlock: string) {
           stockItemName,
 
         actualQty: actualQtyRaw,
+        actual_qty: actualQtyRaw,
+
         billedQty: billedQtyRaw,
+        billed_qty: billedQtyRaw,
 
         quantity,
-        rate,
-        amount,
+        qty: quantity,
 
-        unit:
-          stripXml(readTag(itemBlock, "UNIT")) ||
-          stripXml(readTag(itemBlock, "BASEUNITS")) ||
-          "",
+        rate,
+        price: rate,
+
+        amount,
+        total: amount,
+
+        unit,
 
         hsnCode,
+        hsn_code: hsnCode,
+
         gstRate,
+        gst_rate: gstRate,
+
+        rawTallyData: itemBlock,
+        raw_tally_data: itemBlock,
       };
     })
     .filter((item) => item.stockItemName);
@@ -1138,6 +1199,44 @@ export function parseOutstandings(xml: string) {
         drCr: getDrCr(pendingAmountRaw || openingAmountRaw),
 
         partyType: null,
+        tallyGuid:
+          stripXml(readTag(block, "VOUCHERGUID")) ||
+          stripXml(readTag(block, "GUID")) ||
+          null,
+
+        tally_guid:
+          stripXml(readTag(block, "VOUCHERGUID")) ||
+          stripXml(readTag(block, "GUID")) ||
+          null,
+
+        ledger_guid:
+          stripXml(readTag(block, "LEDGERGUID")) ||
+          stripXml(readTag(block, "PARTYLEDGERGUID")) ||
+          stripXml(readTag(block, "MASTERGUID")) ||
+          null,
+
+        ledger_name: ledgerName,
+
+        voucher_guid:
+          stripXml(readTag(block, "VOUCHERGUID")) ||
+          stripXml(readTag(block, "GUID")) ||
+          null,
+
+        voucher_number: voucherNo || null,
+        voucher_no: voucherNo || null,
+
+        voucherTypeName: voucherType || null,
+        voucher_type_name: voucherType || null,
+
+        voucher_date: voucherDate,
+        due_date: dueDate,
+
+        bill_ref: billRef,
+
+        bill_type: "receivable",
+
+        rawTallyData: block,
+        raw_tally_data: block,
       };
     })
     .filter(
@@ -1289,20 +1388,52 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
         stripXml(readTag(block, "VOUCHERTYPENAME")) ||
         readAttr(block, "VOUCHER", "VCHTYPE");
 
+      const normalizedVoucherType = normalizeText(voucherType);
+      const normalizedExpectedType = normalizeText(expectedVoucherType);
+
+      /**
+       * Works for:
+       * Sales
+       * Sales Order
+       * Purchase
+       * Purchase Order
+       */
       if (
-        expectedVoucherType &&
-        voucherType.toLowerCase() !== expectedVoucherType.toLowerCase()
+        normalizedExpectedType &&
+        !normalizedVoucherType.includes(normalizedExpectedType)
       ) {
         return null;
       }
 
-      const voucherDate = normalizeDate(stripXml(readTag(block, "DATE")));
+      const guid =
+        stripXml(readTag(block, "GUID")) ||
+        stripXml(readTag(block, "VOUCHERGUID")) ||
+        null;
 
-      const partyName =
+      const voucherKey = stripXml(readTag(block, "VOUCHERKEY")) || null;
+      const masterId = stripXml(readTag(block, "MASTERID")) || null;
+      const alterId = stripXml(readTag(block, "ALTERID")) || null;
+
+      const voucherDate =
+        readTallyDate(block, "DATE") ||
+        normalizeDate(stripXml(readTag(block, "DATE")));
+
+      const voucherNumber =
+        stripXml(readTag(block, "VOUCHERNUMBER")) ||
+        stripXml(readTag(block, "REFERENCE")) ||
+        stripXml(readTag(block, "VCHNO")) ||
+        "";
+
+      const partyLedgerName =
         stripXml(readTag(block, "PARTYLEDGERNAME")) ||
         stripXml(readTag(block, "PARTYNAME")) ||
         stripXml(readTag(block, "BASICBUYERNAME")) ||
         stripXml(readTag(block, "BASICSUPPLIERNAME"));
+
+      const partyGuid =
+        stripXml(readTag(block, "PARTYLEDGERGUID")) ||
+        stripXml(readTag(block, "LEDGERGUID")) ||
+        null;
 
       const items = parseVoucherItems(block);
 
@@ -1312,54 +1443,104 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
       );
 
       const voucherAmount = toPositiveNumber(readTag(block, "AMOUNT"));
+      const totalAmount = voucherAmount || itemsTotal;
+
       const costCenterData = parseVoucherCostCenters(block);
 
+      const referenceNumber = readVoucherReferenceNumber(block);
+
+      const basicOrderRef = stripXml(readTag(block, "BASICORDERREF")) || "";
+      const basicBuyerOrderNo =
+        stripXml(readTag(block, "BASICBUYERORDERNO")) || "";
+
+      const orderRef =
+        stripXml(readTag(block, "ORDERREFERENCE")) ||
+        stripXml(readTag(block, "ORDERREF")) ||
+        "";
+
+      const dueDate =
+        readTallyDate(block, "BASICDUEDATEOFPYMT") ||
+        normalizeDate(stripXml(readTag(block, "BASICDUEDATEOFPYMT")));
+
+      const narration = stripXml(readTag(block, "NARRATION"));
+
       return {
-        guid: stripXml(readTag(block, "GUID")),
-        voucherKey: stripXml(readTag(block, "VOUCHERKEY")),
-        masterId: stripXml(readTag(block, "MASTERID")),
-        alterId: stripXml(readTag(block, "ALTERID")),
-
-        voucherNumber:
-          stripXml(readTag(block, "VOUCHERNUMBER")) ||
-          stripXml(readTag(block, "REFERENCE")) ||
-          "",
-
+        /**
+         * Old/current aliases
+         */
+        guid,
+        voucherKey,
+        masterId,
+        alterId,
+        voucherNumber,
         voucherType,
         voucherDate,
-
-        partyName,
-        partyGuid:
-          stripXml(readTag(block, "PARTYLEDGERGUID")) ||
-          stripXml(readTag(block, "LEDGERGUID")) ||
-          null,
-
-        referenceNumber: readVoucherReferenceNumber(block),
-        basicOrderRef: stripXml(readTag(block, "BASICORDERREF")) || "",
-        basicBuyerOrderNo: stripXml(readTag(block, "BASICBUYERORDERNO")) || "",
-        orderRef:
-          stripXml(readTag(block, "ORDERREFERENCE")) ||
-          stripXml(readTag(block, "ORDERREF")) ||
-          "",
-
-        dueDate: normalizeDate(stripXml(readTag(block, "BASICDUEDATEOFPYMT"))),
-
-        narration: stripXml(readTag(block, "NARRATION")),
-
-        totalAmount: voucherAmount || itemsTotal,
-
+        partyName: partyLedgerName,
+        partyGuid,
+        referenceNumber,
+        basicOrderRef,
+        basicBuyerOrderNo,
+        orderRef,
+        dueDate,
+        narration,
+        totalAmount,
         items,
+
         costCenterGuid: costCenterData.costCenterGuid,
         costCenterName: costCenterData.costCenterName,
         costCategory: costCenterData.costCategory,
         costCenterAmount: costCenterData.costCenterAmount,
         costCenterAllocations: costCenterData.costCenterAllocations,
 
+        /**
+         * Backend/CRM safe aliases
+         */
+        tallyGuid: guid,
+        tally_guid: guid,
+
+        voucherGuid: guid,
+        voucher_guid: guid,
+
+        voucher_key: voucherKey,
+
+        master_id: masterId,
+
+        alter_id: alterId,
+
+        voucherNo: voucherNumber,
+        voucher_no: voucherNumber,
+
+        voucher_number: voucherNumber,
+
+        voucherTypeName: voucherType,
+        voucher_type_name: voucherType,
+
+        partyLedgerName,
+        party_ledger_name: partyLedgerName,
+
+        party_name: partyLedgerName,
+
+        partyLedgerGuid: partyGuid,
+        party_ledger_guid: partyGuid,
+
+        reference: referenceNumber,
+        reference_number: referenceNumber,
+
+        basic_order_ref: basicOrderRef,
+        basic_buyer_order_no: basicBuyerOrderNo,
+        order_ref: orderRef,
+
+        amount: totalAmount,
+        total_amount: totalAmount,
+
         cost_center_guid: costCenterData.costCenterGuid,
         cost_center_name: costCenterData.costCenterName,
         cost_category: costCenterData.costCategory,
         cost_center_amount: costCenterData.costCenterAmount,
         cost_center_allocations: costCenterData.costCenterAllocations,
+
+        rawTallyData: block,
+        raw_tally_data: block,
       };
     })
     .filter(Boolean);

@@ -1,10 +1,13 @@
 import {
+  getTallySyncStateFromCrm,
   pushCostCentersToCrm,
   pushLedgersToCrm,
   pushOutstandingsToCrm,
   pushPurchaseOrdersToCrm,
   pushSalesOrdersToCrm,
   pushStockItemsToCrm,
+  updateTallyConnectionInCrm,
+  updateTallySyncStateInCrm,
 } from "./crm.client";
 import {
   parseCostCenters,
@@ -22,6 +25,7 @@ import {
   fetchSalesOrdersXml,
   fetchStockItemsXml,
   fetchTallyCompaniesXml,
+  type TallyDateRange,
 } from "./tally.client";
 
 let isSyncRunning = false;
@@ -167,135 +171,231 @@ function attachCompany<T extends Record<string, any>>(
   return records.map((record) => ({
     ...record,
 
-    // camelCase fields for mapper/backend compatibility
     tallyCompanyName: company.name,
     tallyCompanyGuid: company.guid || null,
 
-    // snake_case fields for DB/API compatibility
     tally_company_name: company.name,
     tally_company_guid: company.guid || null,
   }));
 }
 
-async function syncOneCompany(company: TallyCompanyForSync) {
-  console.log(`[TALLY] Company sync started: ${company.name}`);
+function formatTallyDate(date: Date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
 
-  const ledgersXml = await fetchLedgersXml(company.name);
-  const ledgerXmlText = String(ledgersXml || "");
+  return `${yyyy}${mm}${dd}`;
+}
 
-  const ledgers = attachCompany(parseLedgers(ledgerXmlText), company);
-  const ledgerResult = await pushLedgersToCrm(ledgers);
+function getTodayStartDate() {
+  const date = new Date();
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
 
-  const costCentersXml = await fetchCostCentersXml(company.name);
-  const costCenters = attachCompany(parseCostCenters(costCentersXml), company);
+function buildIncrementalDateRange(lastSuccessfulSyncAt?: string | null) {
+  const today = new Date();
 
-  console.log(
-    `[TALLY] Cost centers parsed for ${company.name}:`,
-    costCenters.length,
-  );
-  console.log("[TALLY] Cost center sample:", costCenters.slice(0, 3));
-
-  const costCenterResult = await pushCostCentersToCrm(costCenters);
-
-  const stockItemsXml = await fetchStockItemsXml(company.name);
-  const stockXmlText = String(stockItemsXml || "");
-
-  const stockItems = attachCompany(parseStockItems(stockXmlText), company);
-  const stockItemResult = await pushStockItemsToCrm(stockItems);
-
-  const salesOrdersXml = await fetchSalesOrdersXml(company.name);
-  const salesOrdersXmlText = String(salesOrdersXml || "");
-
-  const salesOrders = attachCompany(
-    parseSalesOrders(salesOrdersXmlText),
-    company,
-  );
-
-  console.log(
-    `[PARSED SALES ORDERS COUNT - ${company.name}]`,
-    salesOrders.length,
-  );
-  console.log("[PARSED SALES ORDERS SAMPLE]", salesOrders.slice(0, 3));
-
-  const salesOrderResult = await pushSalesOrdersToCrm(salesOrders);
-
-  const purchaseOrdersXml = await fetchPurchaseOrdersXml(company.name);
-  const purchaseOrdersXmlText = String(purchaseOrdersXml || "");
-
-  const purchaseOrders = attachCompany(
-    parsePurchaseOrders(purchaseOrdersXmlText),
-    company,
-  );
-
-  const purchaseOrderResult = await pushPurchaseOrdersToCrm(purchaseOrders);
-
-  const outstandingsXml = await fetchOutstandingsXml(company.name);
-  const outstandingXmlText = String(outstandingsXml || "");
-
-  const parsedOutstandings = parseOutstandings(outstandingXmlText);
-
-  const outstandings = attachCompany(
-    enrichOutstandingsWithLedgerGuid(parsedOutstandings, ledgers),
-    company,
-  );
-
-  console.log("[PARSED OUTSTANDINGS SAMPLE]", {
-    company: company.name,
-    total: outstandings.length,
-    sample: outstandings.slice(0, 5).map((x: any) => ({
-      tallyCompanyName: x.tallyCompanyName || x.tally_company_name,
-      ledgerName: x.ledgerName,
-      billRef: x.billRef,
-      voucherNumber: x.voucherNumber || x.voucherNo,
-      costCenterName: x.costCenterName || x.cost_center_name,
-      costCategory: x.costCategory || x.cost_category,
-      pendingAmount: x.pendingAmount || x.pending_amount,
-    })),
-  });
-
-  const missingLedgerGuid = outstandings.filter((x) => !x.ledgerGuid);
-
-  if (missingLedgerGuid.length) {
-    console.warn(`[TALLY] Missing ledger GUID count for ${company.name}:`, {
-      count: missingLedgerGuid.length,
-      sample: missingLedgerGuid.slice(0, 5).map((x: any) => ({
-        ledgerName: x.ledgerName,
-        billRef: x.billRef,
-      })),
-    });
-  }
-
-  const outstandingResult = await pushOutstandingsToCrm(outstandings);
-
-  console.log(`[TALLY] Company sync completed: ${company.name}`);
+  const fromDate = lastSuccessfulSyncAt
+    ? new Date(lastSuccessfulSyncAt)
+    : getTodayStartDate();
 
   return {
-    company,
-    ledgers: {
-      count: ledgers.length,
-      result: ledgerResult,
-    },
-    stockItems: {
-      count: stockItems.length,
-      result: stockItemResult,
-    },
-    outstandings: {
-      count: outstandings.length,
-      result: outstandingResult,
-    },
-    salesOrders: {
-      count: salesOrders.length,
-      result: salesOrderResult,
-    },
-    purchaseOrders: {
-      count: purchaseOrders.length,
-      result: purchaseOrderResult,
-    },
-    costCenters: {
-      count: costCenters.length,
-      result: costCenterResult,
-    },
+    fromDate: formatTallyDate(fromDate),
+    toDate: formatTallyDate(today),
   };
+}
+
+async function getDateRangeForCompany(
+  company: TallyCompanyForSync,
+): Promise<TallyDateRange> {
+  try {
+    const stateRes = await getTallySyncStateFromCrm({
+      companyName: company.name,
+      companyGuid: company.guid,
+    });
+
+    const state = stateRes?.data || stateRes;
+
+    return buildIncrementalDateRange(state?.last_successful_sync_at || null);
+  } catch (error: any) {
+    console.warn("[TALLY] Failed to get sync state, using today only", {
+      company: company.name,
+      message: error?.message,
+    });
+
+    return buildIncrementalDateRange(null);
+  }
+}
+
+async function syncOneCompany(company: TallyCompanyForSync) {
+  const startedAt = new Date().toISOString();
+
+  console.log(`[TALLY] Incremental company sync started: ${company.name}`);
+
+  await updateTallyConnectionInCrm({
+    companyName: company.name,
+    companyGuid: company.guid,
+  });
+
+  const dateRange = await getDateRangeForCompany(company);
+
+  console.log("[TALLY] Incremental date range", {
+    company: company.name,
+    fromDate: dateRange.fromDate,
+    toDate: dateRange.toDate,
+  });
+
+  try {
+    const ledgersXml = await fetchLedgersXml(company.name);
+    const ledgerXmlText = String(ledgersXml || "");
+
+    const ledgers = attachCompany(parseLedgers(ledgerXmlText), company);
+
+    const ledgerResult = await pushLedgersToCrm(ledgers, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      batchSize: 500,
+    });
+
+    const costCentersXml = await fetchCostCentersXml(company.name);
+    const costCenters = attachCompany(
+      parseCostCenters(costCentersXml),
+      company,
+    );
+
+    const costCenterResult = await pushCostCentersToCrm(costCenters, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      batchSize: 500,
+    });
+
+    const stockItemsXml = await fetchStockItemsXml(company.name);
+    const stockXmlText = String(stockItemsXml || "");
+
+    const stockItems = attachCompany(parseStockItems(stockXmlText), company);
+
+    const stockItemResult = await pushStockItemsToCrm(stockItems, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      batchSize: 500,
+    });
+
+    const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
+    const salesOrdersXmlText = String(salesOrdersXml || "");
+
+    const salesOrders = attachCompany(
+      parseSalesOrders(salesOrdersXmlText),
+      company,
+    );
+
+    const salesOrderResult = await pushSalesOrdersToCrm(salesOrders, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      batchSize: 100,
+    });
+
+    const purchaseOrdersXml = await fetchPurchaseOrdersXml(
+      company.name,
+      dateRange,
+    );
+    const purchaseOrdersXmlText = String(purchaseOrdersXml || "");
+
+    const purchaseOrders = attachCompany(
+      parsePurchaseOrders(purchaseOrdersXmlText),
+      company,
+    );
+
+    const purchaseOrderResult = await pushPurchaseOrdersToCrm(purchaseOrders, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      batchSize: 100,
+    });
+
+    const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
+    const outstandingXmlText = String(outstandingsXml || "");
+
+    const parsedOutstandings = parseOutstandings(outstandingXmlText);
+
+    const outstandings = attachCompany(
+      enrichOutstandingsWithLedgerGuid(parsedOutstandings, ledgers),
+      company,
+    );
+
+    const outstandingResult = await pushOutstandingsToCrm(outstandings, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      batchSize: 100,
+    });
+
+    const completedAt = new Date().toISOString();
+
+    await updateTallySyncStateInCrm({
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      startedAt,
+      completedAt,
+      status: "success",
+    });
+
+    console.log(`[TALLY] Incremental company sync completed: ${company.name}`);
+
+    return {
+      company,
+      dateRange,
+      ledgers: {
+        count: ledgers.length,
+        result: ledgerResult,
+      },
+      stockItems: {
+        count: stockItems.length,
+        result: stockItemResult,
+      },
+      outstandings: {
+        count: outstandings.length,
+        result: outstandingResult,
+      },
+      salesOrders: {
+        count: salesOrders.length,
+        result: salesOrderResult,
+      },
+      purchaseOrders: {
+        count: purchaseOrders.length,
+        result: purchaseOrderResult,
+      },
+      costCenters: {
+        count: costCenters.length,
+        result: costCenterResult,
+      },
+    };
+  } catch (error: any) {
+    const completedAt = new Date().toISOString();
+
+    await updateTallySyncStateInCrm({
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "incremental",
+      startedAt,
+      completedAt,
+      status: "failed",
+      errorMessage: error?.message || "Incremental sync failed",
+    });
+
+    throw error;
+  }
 }
 
 export async function runFullSync() {
@@ -347,6 +447,7 @@ export async function runFullSync() {
 
     return {
       skipped: false,
+      syncMode: "incremental",
       companies: {
         count: companies.length,
         records: companies,
