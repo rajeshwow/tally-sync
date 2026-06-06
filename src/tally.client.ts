@@ -1,6 +1,9 @@
 import axios from "axios";
 
 const TALLY_URL = process.env.TALLY_URL;
+const TALLY_REQUEST_TIMEOUT_MS = Number(
+  process.env.TALLY_REQUEST_TIMEOUT_MS || 300000,
+);
 
 if (!TALLY_URL) {
   throw new Error("[TALLY CLIENT] TALLY_URL is missing in .env");
@@ -16,7 +19,7 @@ export async function postToTally(xml: string) {
     headers: {
       "Content-Type": "text/xml",
     },
-    timeout: 120000,
+    timeout: TALLY_REQUEST_TIMEOUT_MS,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
   });

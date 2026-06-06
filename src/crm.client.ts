@@ -3,6 +3,9 @@ import axios, { AxiosError } from "axios";
 const CRM_BASE_URL = process.env.CRM_BASE_URL;
 const CRM_TENANT_SLUG = process.env.CRM_TENANT_SLUG;
 const TALLY_AGENT_TOKEN = process.env.TALLY_AGENT_TOKEN;
+const CRM_REQUEST_TIMEOUT_MS = Number(
+  process.env.CRM_REQUEST_TIMEOUT_MS || 300000,
+);
 
 if (!CRM_BASE_URL) {
   throw new Error("[CRM CLIENT] CRM_BASE_URL is missing in .env");
@@ -18,7 +21,7 @@ if (!TALLY_AGENT_TOKEN) {
 
 const client = axios.create({
   baseURL: `${CRM_BASE_URL.replace(/\/$/, "")}/${CRM_TENANT_SLUG}`,
-  timeout: 120000,
+  timeout: CRM_REQUEST_TIMEOUT_MS,
   headers: {
     Authorization: `Bearer ${TALLY_AGENT_TOKEN}`,
     "Content-Type": "application/json",
@@ -146,6 +149,24 @@ async function pushRecordsToCrm(
 
       summary.successBatches += 1;
       summary.results.push(result);
+
+      const importedBatches = index + 1;
+      const pendingBatches = batches.length - importedBatches;
+      const importedRecords = Math.min(importedBatches * batchSize, safeRecords.length);
+      const pendingRecords = Math.max(safeRecords.length - importedRecords, 0);
+
+      console.log("[CRM CLIENT] Batch imported", {
+        moduleName: summary.moduleName,
+        companyName: summary.companyName,
+        syncMode: summary.syncMode,
+        fromDate: summary.fromDate,
+        toDate: summary.toDate,
+        packetsImported: `${importedBatches}/${batches.length}`,
+        packetsPending: pendingBatches,
+        recordsImported: importedRecords,
+        recordsPending: pendingRecords,
+        lastPacketSize: batch.length,
+      });
     } catch (error) {
       summary.failedBatches += 1;
       throw error;

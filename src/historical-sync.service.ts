@@ -32,6 +32,31 @@ import {
 
 let isHistoricalSyncRunning = false;
 
+type HistoricalSyncRequest = {
+  startYear?: number;
+  companyName?: string;
+};
+
+type HistoricalSyncStatus = {
+  status: "idle" | "running" | "success" | "failed";
+  isRunning: boolean;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  request: Required<HistoricalSyncRequest> | null;
+  lastResult: any;
+};
+
+const historicalSyncStatus: HistoricalSyncStatus = {
+  status: "idle",
+  isRunning: false,
+  startedAt: null,
+  completedAt: null,
+  error: null,
+  request: null,
+  lastResult: null,
+};
+
 type TallyCompanyForSync = {
   name: string;
   guid?: string | null;
@@ -194,27 +219,74 @@ function formatTallyDate(date: Date) {
   return `${yyyy}${mm}${dd}`;
 }
 
-function buildFinancialYearRanges(input: {
+function getRangeChunkMonths() {
+  return Math.max(1, Number(process.env.HISTORICAL_SYNC_RANGE_MONTHS || 1));
+}
+
+function buildHistoricalDateRanges(input: {
   startYear: number;
   endDate?: Date;
 }): TallyDateRange[] {
   const today = input.endDate || new Date();
   const ranges: TallyDateRange[] = [];
+  const chunkMonths = getRangeChunkMonths();
 
   const currentFinancialYear =
     today.getMonth() + 1 >= 4 ? today.getFullYear() : today.getFullYear() - 1;
 
   for (let year = input.startYear; year <= currentFinancialYear; year++) {
-    const from = new Date(year, 3, 1);
-    const to = new Date(year + 1, 2, 31);
+    const financialYearStart = new Date(year, 3, 1);
+    const financialYearEnd = new Date(year + 1, 2, 31);
 
-    ranges.push({
-      fromDate: formatTallyDate(from),
-      toDate: formatTallyDate(to > today ? today : to),
-    });
+    for (
+      let rangeStart = new Date(financialYearStart);
+      rangeStart <= financialYearEnd && rangeStart <= today;
+      rangeStart = new Date(
+        rangeStart.getFullYear(),
+        rangeStart.getMonth() + chunkMonths,
+        1,
+      )
+    ) {
+      const rangeEnd = new Date(
+        rangeStart.getFullYear(),
+        rangeStart.getMonth() + chunkMonths,
+        0,
+      );
+
+      ranges.push({
+        fromDate: formatTallyDate(rangeStart),
+        toDate: formatTallyDate(
+          rangeEnd > today
+            ? today
+            : rangeEnd > financialYearEnd
+              ? financialYearEnd
+              : rangeEnd,
+        ),
+      });
+    }
   }
 
   return ranges;
+}
+
+function normalizeHistoricalRequest(input?: HistoricalSyncRequest) {
+  return {
+    startYear: Number(input?.startYear || 2022),
+    companyName: input?.companyName || "",
+  };
+}
+
+function setHistoricalSyncStatus(
+  patch: Partial<HistoricalSyncStatus>,
+): HistoricalSyncStatus {
+  Object.assign(historicalSyncStatus, patch);
+  return getHistoricalSyncStatus();
+}
+
+export function getHistoricalSyncStatus(): HistoricalSyncStatus {
+  return {
+    ...historicalSyncStatus,
+  };
 }
 
 async function syncCompanyMasters(company: TallyCompanyForSync) {
@@ -407,10 +479,7 @@ async function syncCompanyTransactionsByRange(input: {
   }
 }
 
-export async function runHistoricalSync(input?: {
-  startYear?: number;
-  companyName?: string;
-}) {
+export async function runHistoricalSync(input?: HistoricalSyncRequest) {
   if (isHistoricalSyncRunning) {
     return {
       skipped: true,
@@ -421,33 +490,55 @@ export async function runHistoricalSync(input?: {
   isHistoricalSyncRunning = true;
 
   const startedAt = new Date().toISOString();
+  const request = normalizeHistoricalRequest(input);
+
+  setHistoricalSyncStatus({
+    status: "running",
+    isRunning: true,
+    startedAt,
+    completedAt: null,
+    error: null,
+    request,
+    lastResult: null,
+  });
 
   try {
-    const startYear = input?.startYear || 2022;
+    const startYear = request.startYear;
 
     console.log("[HISTORICAL SYNC] Started", {
       startYear,
-      companyName: input?.companyName || "ALL",
+      companyName: request.companyName || "ALL",
     });
 
     const companies = await getCompaniesForHistoricalSync();
 
-    const selectedCompanies = input?.companyName
+    const selectedCompanies = request.companyName
       ? companies.filter(
           (company) =>
-            normalizeName(company.name) === normalizeName(input.companyName),
+            normalizeName(company.name) === normalizeName(request.companyName),
         )
       : companies;
 
     if (!selectedCompanies.length) {
-      return {
+      const completedAt = new Date().toISOString();
+      const result = {
         skipped: false,
         status: "empty",
         message: "No company found",
       };
+
+      setHistoricalSyncStatus({
+        status: "success",
+        isRunning: false,
+        completedAt,
+        error: null,
+        lastResult: result,
+      });
+
+      return result;
     }
 
-    const dateRanges = buildFinancialYearRanges({
+    const dateRanges = buildHistoricalDateRanges({
       startYear,
     });
 
@@ -516,7 +607,7 @@ export async function runHistoricalSync(input?: {
 
     const completedAt = new Date().toISOString();
 
-    return {
+    const result = {
       skipped: false,
       status: "success",
       message: "Historical sync completed",
@@ -529,7 +620,54 @@ export async function runHistoricalSync(input?: {
       ranges: dateRanges,
       companyResults,
     };
+
+    setHistoricalSyncStatus({
+      status: "success",
+      isRunning: false,
+      completedAt,
+      error: null,
+      lastResult: result,
+    });
+
+    return result;
+  } catch (error: any) {
+    const completedAt = new Date().toISOString();
+
+    setHistoricalSyncStatus({
+      status: "failed",
+      isRunning: false,
+      completedAt,
+      error: error?.message || "Historical sync failed",
+      lastResult: null,
+    });
+
+    throw error;
   } finally {
     isHistoricalSyncRunning = false;
   }
+}
+
+export function startHistoricalSyncInBackground(input?: HistoricalSyncRequest) {
+  if (isHistoricalSyncRunning) {
+    return {
+      started: false,
+      message: "Previous historical sync is still running",
+      data: getHistoricalSyncStatus(),
+    };
+  }
+
+  const request = normalizeHistoricalRequest(input);
+
+  void runHistoricalSync(request).catch((error: any) => {
+    console.error("[HISTORICAL SYNC] Background run failed", error);
+  });
+
+  return {
+    started: true,
+    message: "Historical sync started",
+    data: {
+      ...getHistoricalSyncStatus(),
+      request,
+    },
+  };
 }

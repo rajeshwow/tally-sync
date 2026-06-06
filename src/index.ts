@@ -3,7 +3,10 @@ import "dotenv/config";
 import express, { NextFunction, Request, Response } from "express";
 import cron from "node-cron";
 import { updateTallyConnectionInCrm } from "./crm.client";
-import { runHistoricalSync } from "./historical-sync.service";
+import {
+  getHistoricalSyncStatus,
+  startHistoricalSyncInBackground,
+} from "./historical-sync.service";
 import { parseTallyLoadedCompany } from "./mapper";
 import { runFullSync } from "./sync.service";
 import { fetchTallyCompaniesXml } from "./tally.client";
@@ -197,29 +200,25 @@ app.post(
   },
 );
 
-app.post("/sync/historical", async (req, res) => {
-  try {
-    const result = await runHistoricalSync({
-      startYear: Number(req.body?.startYear || 2022),
-      companyName: req.body?.companyName || undefined,
-    });
+app.get("/sync/historical/status", requireControlToken, (_req, res) => {
+  return res.status(200).json({
+    statusCode: 200,
+    message: "Historical sync status fetched",
+    data: getHistoricalSyncStatus(),
+  });
+});
 
-    return res.status(200).json({
-      statusCode: 200,
-      message: "Historical sync completed",
-      data: result,
-    });
-  } catch (error: any) {
-    console.error("[HISTORICAL SYNC] Failed", error);
+app.post("/sync/historical", requireControlToken, (req, res) => {
+  const result = startHistoricalSyncInBackground({
+    startYear: Number(req.body?.startYear || 2022),
+    companyName: req.body?.companyName || undefined,
+  });
 
-    return res.status(500).json({
-      statusCode: 500,
-      message: "Historical sync failed",
-      data: {
-        error: error?.message || "Unknown error",
-      },
-    });
-  }
+  return res.status(result.started ? 202 : 409).json({
+    statusCode: result.started ? 202 : 409,
+    message: result.message,
+    data: result.data,
+  });
 });
 
 cron.schedule(SYNC_CRON, async () => {
