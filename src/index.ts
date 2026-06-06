@@ -68,6 +68,12 @@ function getAgentStatus() {
   };
 }
 
+function isHistoricalSyncActive() {
+  const status = getHistoricalSyncStatus();
+
+  return Boolean(status?.isRunning || status?.progress?.isRunning);
+}
+
 /**
  * CRM backend will call this API for connection check.
  */
@@ -92,6 +98,17 @@ app.post(
         statusCode: 409,
         message: "Tally sync is already running",
         data: getAgentStatus(),
+      });
+    }
+
+    if (isHistoricalSyncActive()) {
+      return res.status(409).json({
+        statusCode: 409,
+        message: "Historical sync is already running. Manual sync skipped.",
+        data: {
+          agent: getAgentStatus(),
+          historical: getHistoricalSyncStatus(),
+        },
       });
     }
 
@@ -166,6 +183,17 @@ app.post(
         });
       }
 
+      if (isHistoricalSyncActive()) {
+        return res.status(409).json({
+          statusCode: 409,
+          message: "Historical sync is already running. Sync now skipped.",
+          data: {
+            agent: getAgentStatus(),
+            historical: getHistoricalSyncStatus(),
+          },
+        });
+      }
+
       isManualSyncRunning = true;
       lastManualSyncStatus = "running";
       lastManualSyncStartedAt = new Date().toISOString();
@@ -209,6 +237,17 @@ app.get("/sync/historical/status", requireControlToken, (_req, res) => {
 });
 
 app.post("/sync/historical", requireControlToken, (req, res) => {
+  if (isManualSyncRunning) {
+    return res.status(409).json({
+      statusCode: 409,
+      message: "Manual sync is already running. Historical sync skipped.",
+      data: {
+        agent: getAgentStatus(),
+        historical: getHistoricalSyncStatus(),
+      },
+    });
+  }
+
   const result = startHistoricalSyncInBackground({
     startYear: Number(req.body?.startYear || 2022),
     companyName: req.body?.companyName || undefined,
@@ -225,6 +264,11 @@ cron.schedule(SYNC_CRON, async () => {
   try {
     if (isManualSyncRunning) {
       console.log("[CRON SYNC] Skipped because manual sync is running");
+      return;
+    }
+
+    if (isHistoricalSyncActive()) {
+      console.log("[CRON SYNC] Skipped because historical sync is running");
       return;
     }
 

@@ -32,6 +32,32 @@ const client = axios.create({
 
 type SyncMode = "historical" | "incremental";
 
+export type PushProgressEvent = {
+  type:
+    | "module_start"
+    | "batch_start"
+    | "batch_success"
+    | "batch_failed"
+    | "module_complete";
+  moduleName: string;
+  companyName?: string | null;
+  companyGuid?: string | null;
+  syncMode: SyncMode;
+  fromDate?: string | null;
+  toDate?: string | null;
+  totalRecords: number;
+  batchSize: number;
+  totalBatches: number;
+  batchNo?: number;
+  batchRecords?: number;
+  uploadedRecords: number;
+  pendingRecords: number;
+  failedRecords: number;
+  uploadedBatches: number;
+  failedBatches: number;
+  errorMessage?: string | null;
+};
+
 type PushOptions = {
   batchSize?: number;
   companyName?: string;
@@ -40,6 +66,7 @@ type PushOptions = {
   syncMode?: SyncMode;
   fromDate?: string | null;
   toDate?: string | null;
+  onProgress?: (event: PushProgressEvent) => void;
 };
 
 function chunkArray<T>(records: T[], size: number): T[][] {
@@ -97,9 +124,10 @@ async function pushRecordsToCrm(
   const safeRecords = Array.isArray(records) ? records : [];
   const batchSize = options.batchSize || 200;
   const batches = chunkArray(safeRecords, batchSize);
+  const moduleName = options.moduleName || url;
 
   const summary = {
-    moduleName: options.moduleName || url,
+    moduleName,
     companyName: options.companyName || null,
     companyGuid: options.companyGuid || null,
     syncMode: options.syncMode || "incremental",
@@ -110,16 +138,44 @@ async function pushRecordsToCrm(
     totalBatches: batches.length,
     successBatches: 0,
     failedBatches: 0,
+    uploadedRecords: 0,
+    failedRecords: 0,
+    pendingRecords: safeRecords.length,
     results: [] as any[],
   };
 
+  const emitProgress = (event: Partial<PushProgressEvent>) => {
+    options.onProgress?.({
+      type: event.type || "batch_start",
+      moduleName,
+      companyName: options.companyName || null,
+      companyGuid: options.companyGuid || null,
+      syncMode: options.syncMode || "incremental",
+      fromDate: options.fromDate || null,
+      toDate: options.toDate || null,
+      totalRecords: safeRecords.length,
+      batchSize,
+      totalBatches: batches.length,
+      uploadedRecords: summary.uploadedRecords,
+      pendingRecords: summary.pendingRecords,
+      failedRecords: summary.failedRecords,
+      uploadedBatches: summary.successBatches,
+      failedBatches: summary.failedBatches,
+      ...event,
+    });
+  };
+
+  emitProgress({ type: "module_start" });
+
   if (!safeRecords.length) {
     console.log("[CRM CLIENT] No records to push", summary);
+    emitProgress({ type: "module_complete" });
     return summary;
   }
 
   for (let index = 0; index < batches.length; index++) {
     const batch = batches[index];
+    const batchNo = index + 1;
 
     console.log("[CRM CLIENT] Pushing batch", {
       moduleName: summary.moduleName,
@@ -127,8 +183,14 @@ async function pushRecordsToCrm(
       syncMode: summary.syncMode,
       fromDate: summary.fromDate,
       toDate: summary.toDate,
-      batch: `${index + 1}/${batches.length}`,
+      batch: `${batchNo}/${batches.length}`,
       records: batch.length,
+    });
+
+    emitProgress({
+      type: "batch_start",
+      batchNo,
+      batchRecords: batch.length,
     });
 
     try {
@@ -141,19 +203,19 @@ async function pushRecordsToCrm(
           sync_mode: options.syncMode || "incremental",
           from_date: options.fromDate || null,
           to_date: options.toDate || null,
-          batch_no: index + 1,
+          batch_no: batchNo,
           total_batches: batches.length,
           batch_size: batch.length,
         },
       });
 
       summary.successBatches += 1;
+      summary.uploadedRecords += batch.length;
+      summary.pendingRecords = Math.max(
+        safeRecords.length - summary.uploadedRecords - summary.failedRecords,
+        0,
+      );
       summary.results.push(result);
-
-      const importedBatches = index + 1;
-      const pendingBatches = batches.length - importedBatches;
-      const importedRecords = Math.min(importedBatches * batchSize, safeRecords.length);
-      const pendingRecords = Math.max(safeRecords.length - importedRecords, 0);
 
       console.log("[CRM CLIENT] Batch imported", {
         moduleName: summary.moduleName,
@@ -161,17 +223,39 @@ async function pushRecordsToCrm(
         syncMode: summary.syncMode,
         fromDate: summary.fromDate,
         toDate: summary.toDate,
-        packetsImported: `${importedBatches}/${batches.length}`,
-        packetsPending: pendingBatches,
-        recordsImported: importedRecords,
-        recordsPending: pendingRecords,
+        packetsImported: `${summary.successBatches}/${batches.length}`,
+        packetsPending:
+          batches.length - summary.successBatches - summary.failedBatches,
+        recordsImported: summary.uploadedRecords,
+        recordsPending: summary.pendingRecords,
         lastPacketSize: batch.length,
       });
-    } catch (error) {
+
+      emitProgress({
+        type: "batch_success",
+        batchNo,
+        batchRecords: batch.length,
+      });
+    } catch (error: any) {
       summary.failedBatches += 1;
+      summary.failedRecords += batch.length;
+      summary.pendingRecords = Math.max(
+        safeRecords.length - summary.uploadedRecords - summary.failedRecords,
+        0,
+      );
+
+      emitProgress({
+        type: "batch_failed",
+        batchNo,
+        batchRecords: batch.length,
+        errorMessage: error?.message || "CRM batch push failed",
+      });
+
       throw error;
     }
   }
+
+  emitProgress({ type: "module_complete" });
 
   return summary;
 }

@@ -8,6 +8,7 @@ import {
   pushStockItemsToCrm,
   updateTallyConnectionInCrm,
   updateTallySyncStateInCrm,
+  type PushProgressEvent,
 } from "./crm.client";
 
 import {
@@ -29,6 +30,18 @@ import {
   fetchTallyCompaniesXml,
   type TallyDateRange,
 } from "./tally.client";
+
+import {
+  addSyncEvent,
+  completeCompany,
+  completeRange,
+  finishSyncProgress,
+  getSyncProgress,
+  setActiveCompany,
+  setActiveRange,
+  startSyncProgress,
+  upsertModuleProgress,
+} from "./sync-progress.store";
 
 let isHistoricalSyncRunning = false;
 
@@ -283,9 +296,70 @@ function setHistoricalSyncStatus(
   return getHistoricalSyncStatus();
 }
 
-export function getHistoricalSyncStatus(): HistoricalSyncStatus {
+export function getHistoricalSyncStatus(): any {
   return {
     ...historicalSyncStatus,
+    progress: getSyncProgress(),
+  };
+}
+
+function createCrmPushProgressHandler() {
+  return (event: PushProgressEvent) => {
+    const statusByEvent: Record<PushProgressEvent["type"], any> = {
+      module_start: "uploading",
+      batch_start: "uploading",
+      batch_success: "uploading",
+      batch_failed: "failed",
+      module_complete: "success",
+    };
+
+    upsertModuleProgress({
+      moduleName: event.moduleName,
+      companyName: event.companyName || null,
+      companyGuid: event.companyGuid || null,
+      fromDate: event.fromDate || null,
+      toDate: event.toDate || null,
+      status: statusByEvent[event.type],
+      totalRecords: event.totalRecords,
+      uploadedRecords: event.uploadedRecords,
+      failedRecords: event.failedRecords,
+      pendingRecords: event.pendingRecords,
+      batchSize: event.batchSize,
+      totalBatches: event.totalBatches,
+      uploadedBatches: event.uploadedBatches,
+      failedBatches: event.failedBatches,
+      currentBatch: event.batchNo || 0,
+      completedAt:
+        event.type === "module_complete" ? new Date().toISOString() : null,
+      error: event.errorMessage || null,
+    });
+
+    if (event.type === "batch_success") {
+      addSyncEvent({
+        level: "info",
+        message: `${event.moduleName}: batch ${event.batchNo}/${event.totalBatches} uploaded`,
+        companyName: event.companyName || null,
+        moduleName: event.moduleName,
+        fromDate: event.fromDate || null,
+        toDate: event.toDate || null,
+        details: {
+          uploadedRecords: event.uploadedRecords,
+          pendingRecords: event.pendingRecords,
+        },
+      });
+    }
+
+    if (event.type === "batch_failed") {
+      addSyncEvent({
+        level: "error",
+        message: `${event.moduleName}: batch ${event.batchNo}/${event.totalBatches} failed`,
+        companyName: event.companyName || null,
+        moduleName: event.moduleName,
+        fromDate: event.fromDate || null,
+        toDate: event.toDate || null,
+        details: event.errorMessage || null,
+      });
+    }
   };
 }
 
@@ -299,17 +373,41 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     companyGuid: company.guid,
   });
 
+  upsertModuleProgress({
+    moduleName: "ledgers",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "fetching",
+  });
+
   const ledgersXml = await fetchLedgersXml(company.name);
   const ledgers = attachCompany(
     parseLedgers(String(ledgersXml || "")),
     company,
   );
 
+  upsertModuleProgress({
+    moduleName: "ledgers",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "parsed",
+    totalRecords: ledgers.length,
+    pendingRecords: ledgers.length,
+  });
+
   const ledgerResult = await pushLedgersToCrm(ledgers, {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
     batchSize: 500,
+    onProgress: createCrmPushProgressHandler(),
+  });
+
+  upsertModuleProgress({
+    moduleName: "stock-items",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "fetching",
   });
 
   const stockItemsXml = await fetchStockItemsXml(company.name);
@@ -318,11 +416,28 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     company,
   );
 
+  upsertModuleProgress({
+    moduleName: "stock-items",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "parsed",
+    totalRecords: stockItems.length,
+    pendingRecords: stockItems.length,
+  });
+
   const stockItemResult = await pushStockItemsToCrm(stockItems, {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
     batchSize: 500,
+    onProgress: createCrmPushProgressHandler(),
+  });
+
+  upsertModuleProgress({
+    moduleName: "cost-centers",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "fetching",
   });
 
   const costCentersXml = await fetchCostCentersXml(company.name);
@@ -331,11 +446,21 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     company,
   );
 
+  upsertModuleProgress({
+    moduleName: "cost-centers",
+    companyName: company.name,
+    companyGuid: company.guid,
+    status: "parsed",
+    totalRecords: costCenters.length,
+    pendingRecords: costCenters.length,
+  });
+
   const costCenterResult = await pushCostCentersToCrm(costCenters, {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
     batchSize: 500,
+    onProgress: createCrmPushProgressHandler(),
   });
 
   console.log("[HISTORICAL SYNC] Masters completed", {
@@ -382,11 +507,31 @@ async function syncCompanyTransactionsByRange(input: {
   });
 
   try {
+    upsertModuleProgress({
+      moduleName: "sales-orders",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "fetching",
+    });
+
     const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
     const salesOrders = attachCompany(
       parseSalesOrders(String(salesOrdersXml || "")),
       company,
     );
+
+    upsertModuleProgress({
+      moduleName: "sales-orders",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "parsed",
+      totalRecords: salesOrders.length,
+      pendingRecords: salesOrders.length,
+    });
 
     const salesOrderResult = await pushSalesOrdersToCrm(salesOrders, {
       companyName: company.name,
@@ -395,6 +540,16 @@ async function syncCompanyTransactionsByRange(input: {
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
       batchSize: 100,
+      onProgress: createCrmPushProgressHandler(),
+    });
+
+    upsertModuleProgress({
+      moduleName: "purchase-orders",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "fetching",
     });
 
     const purchaseOrdersXml = await fetchPurchaseOrdersXml(
@@ -407,6 +562,17 @@ async function syncCompanyTransactionsByRange(input: {
       company,
     );
 
+    upsertModuleProgress({
+      moduleName: "purchase-orders",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "parsed",
+      totalRecords: purchaseOrders.length,
+      pendingRecords: purchaseOrders.length,
+    });
+
     const purchaseOrderResult = await pushPurchaseOrdersToCrm(purchaseOrders, {
       companyName: company.name,
       companyGuid: company.guid,
@@ -414,6 +580,16 @@ async function syncCompanyTransactionsByRange(input: {
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
       batchSize: 100,
+      onProgress: createCrmPushProgressHandler(),
+    });
+
+    upsertModuleProgress({
+      moduleName: "outstandings",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "fetching",
     });
 
     const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
@@ -424,6 +600,17 @@ async function syncCompanyTransactionsByRange(input: {
       company,
     );
 
+    upsertModuleProgress({
+      moduleName: "outstandings",
+      companyName: company.name,
+      companyGuid: company.guid,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      status: "parsed",
+      totalRecords: outstandings.length,
+      pendingRecords: outstandings.length,
+    });
+
     const outstandingResult = await pushOutstandingsToCrm(outstandings, {
       companyName: company.name,
       companyGuid: company.guid,
@@ -431,6 +618,7 @@ async function syncCompanyTransactionsByRange(input: {
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
       batchSize: 100,
+      onProgress: createCrmPushProgressHandler(),
     });
 
     await markHistoricalSyncProgressInCrm({
@@ -439,6 +627,12 @@ async function syncCompanyTransactionsByRange(input: {
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
       status: "success",
+    });
+
+    completeRange({
+      companyName: company.name,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
     });
 
     console.log("[HISTORICAL SYNC] Range completed", {
@@ -473,6 +667,15 @@ async function syncCompanyTransactionsByRange(input: {
       toDate: dateRange.toDate,
       status: "failed",
       errorMessage: error?.message || "Historical sync failed",
+    });
+
+    addSyncEvent({
+      level: "error",
+      message: `Range failed: ${dateRange.fromDate} to ${dateRange.toDate}`,
+      companyName: company.name,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      details: error?.message || "Historical sync failed",
     });
 
     throw error;
@@ -542,9 +745,23 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       startYear,
     });
 
+    startSyncProgress({
+      mode: "historical",
+      request,
+      companiesTotal: selectedCompanies.length,
+      rangesTotal: selectedCompanies.length * dateRanges.length,
+    });
+
     const companyResults = [];
 
-    for (const company of selectedCompanies) {
+    for (const [companyIndex, company] of selectedCompanies.entries()) {
+      setActiveCompany({
+        index: companyIndex + 1,
+        total: selectedCompanies.length,
+        name: company.name,
+        guid: company.guid,
+      });
+
       const companyStartedAt = new Date().toISOString();
 
       console.log("[HISTORICAL SYNC] Company started", {
@@ -557,7 +774,15 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
 
         const rangeResults = [];
 
-        for (const dateRange of dateRanges) {
+        for (const [rangeIndex, dateRange] of dateRanges.entries()) {
+          setActiveRange({
+            index: rangeIndex + 1,
+            total: dateRanges.length,
+            fromDate: dateRange.fromDate,
+            toDate: dateRange.toDate,
+            companyName: company.name,
+          });
+
           const result = await syncCompanyTransactionsByRange({
             company,
             dateRange,
@@ -583,6 +808,8 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
           masters: masterResult.counts,
           ranges: rangeResults,
         });
+
+        completeCompany(company.name);
 
         console.log("[HISTORICAL SYNC] Company completed", {
           company: company.name,
@@ -629,6 +856,11 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       lastResult: result,
     });
 
+    finishSyncProgress({
+      status: "success",
+      lastResult: result,
+    });
+
     return result;
   } catch (error: any) {
     const completedAt = new Date().toISOString();
@@ -639,6 +871,11 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       completedAt,
       error: error?.message || "Historical sync failed",
       lastResult: null,
+    });
+
+    finishSyncProgress({
+      status: "failed",
+      error: error?.message || "Historical sync failed",
     });
 
     throw error;
