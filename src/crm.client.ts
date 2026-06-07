@@ -167,8 +167,13 @@ async function pushRecordsToCrm(
 
   emitProgress({ type: "module_start" });
 
+  const company = options.companyName ? ` [${options.companyName}]` : "";
+
+  console.log(
+    `[SYNC]${company} ${moduleName.padEnd(18)} → ${safeRecords.length} records, ${batches.length} batches`,
+  );
+
   if (!safeRecords.length) {
-    console.log("[CRM CLIENT] No records to push", summary);
     emitProgress({ type: "module_complete" });
     return summary;
   }
@@ -177,15 +182,11 @@ async function pushRecordsToCrm(
     const batch = batches[index];
     const batchNo = index + 1;
 
-    console.log("[CRM CLIENT] Pushing batch", {
-      moduleName: summary.moduleName,
-      companyName: summary.companyName,
-      syncMode: summary.syncMode,
-      fromDate: summary.fromDate,
-      toDate: summary.toDate,
-      batch: `${batchNo}/${batches.length}`,
-      records: batch.length,
-    });
+    const batchLabel = `${batchNo}/${batches.length}`;
+
+    console.log(
+      `[SYNC]${company} ${moduleName.padEnd(18)} ⏳ Batch ${batchLabel} — ${batch.length} records`,
+    );
 
     emitProgress({
       type: "batch_start",
@@ -217,19 +218,9 @@ async function pushRecordsToCrm(
       );
       summary.results.push(result);
 
-      console.log("[CRM CLIENT] Batch imported", {
-        moduleName: summary.moduleName,
-        companyName: summary.companyName,
-        syncMode: summary.syncMode,
-        fromDate: summary.fromDate,
-        toDate: summary.toDate,
-        packetsImported: `${summary.successBatches}/${batches.length}`,
-        packetsPending:
-          batches.length - summary.successBatches - summary.failedBatches,
-        recordsImported: summary.uploadedRecords,
-        recordsPending: summary.pendingRecords,
-        lastPacketSize: batch.length,
-      });
+      console.log(
+        `[SYNC]${company} ${moduleName.padEnd(18)} ✅ Batch ${batchLabel} done — ${summary.uploadedRecords}/${safeRecords.length} records uploaded`,
+      );
 
       emitProgress({
         type: "batch_success",
@@ -256,6 +247,10 @@ async function pushRecordsToCrm(
   }
 
   emitProgress({ type: "module_complete" });
+
+  console.log(
+    `[SYNC]${company} ${moduleName.padEnd(18)} ✔ Complete — ${summary.uploadedRecords}/${safeRecords.length} records, ${summary.successBatches}/${batches.length} batches`,
+  );
 
   return summary;
 }

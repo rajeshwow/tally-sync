@@ -296,10 +296,112 @@ function setHistoricalSyncStatus(
   return getHistoricalSyncStatus();
 }
 
+function buildHistoricalLiveProgress(progress: any) {
+  const modules = Array.isArray(progress.modules) ? progress.modules : [];
+
+  const activeModule =
+    modules.find((item: any) =>
+      ["fetching", "parsed", "uploading"].includes(item.status),
+    ) ||
+    modules.find((item: any) => item.status === "failed") ||
+    null;
+
+  const activeModuleIndex = activeModule
+    ? modules.findIndex((item: any) => item.key === activeModule.key) + 1
+    : Math.min(progress.summary.modulesCompleted || 0, modules.length);
+
+  const modulesCompleted = modules.filter((item: any) =>
+    ["success", "skipped"].includes(item.status),
+  ).length;
+
+  const modulesFailed = modules.filter(
+    (item: any) => item.status === "failed",
+  ).length;
+
+  return {
+    runId: progress.runId,
+    mode: progress.mode,
+    status: progress.status,
+    isRunning: progress.isRunning,
+
+    startedAt: progress.startedAt,
+    completedAt: progress.completedAt,
+    error: progress.error,
+
+    currentCompany: {
+      step: `${progress.activeCompany.index || 0}/${progress.activeCompany.total || 0}`,
+      index: progress.activeCompany.index || 0,
+      total: progress.activeCompany.total || 0,
+      name: progress.activeCompany.name || null,
+      guid: progress.activeCompany.guid || null,
+    },
+
+    currentRange: {
+      step: `${progress.activeRange.index || 0}/${progress.activeRange.total || 0}`,
+      index: progress.activeRange.index || 0,
+      total: progress.activeRange.total || 0,
+      fromDate: progress.activeRange.fromDate || null,
+      toDate: progress.activeRange.toDate || null,
+    },
+
+    currentModule: activeModule
+      ? {
+          step: `${activeModuleIndex}/${modules.length}`,
+          index: activeModuleIndex,
+          total: modules.length,
+          name: activeModule.moduleName,
+          companyName: activeModule.companyName || null,
+          companyGuid: activeModule.companyGuid || null,
+          fromDate: activeModule.fromDate || null,
+          toDate: activeModule.toDate || null,
+          status: activeModule.status,
+
+          pulledRecords: activeModule.totalRecords || 0,
+          uploadedRecords: activeModule.uploadedRecords || 0,
+          pendingRecords: activeModule.pendingRecords || 0,
+          failedRecords: activeModule.failedRecords || 0,
+
+          batch: `${activeModule.currentBatch || 0}/${activeModule.totalBatches || 0}`,
+          currentBatch: activeModule.currentBatch || 0,
+          totalBatches: activeModule.totalBatches || 0,
+          uploadedBatches: activeModule.uploadedBatches || 0,
+          failedBatches: activeModule.failedBatches || 0,
+
+          startedAt: activeModule.startedAt || null,
+          completedAt: activeModule.completedAt || null,
+          error: activeModule.error || null,
+        }
+      : null,
+
+    summary: {
+      companies: `${progress.summary.companiesCompleted || 0}/${progress.summary.companiesTotal || 0}`,
+      ranges: `${progress.summary.rangesCompleted || 0}/${progress.summary.rangesTotal || 0}`,
+      modules: `${modulesCompleted}/${modules.length}`,
+      modulesTotal: modules.length,
+      modulesCompleted,
+      modulesFailed,
+
+      pulledRecords: progress.summary.totalRecords || 0,
+      uploadedRecords: progress.summary.uploadedRecords || 0,
+      pendingRecords: progress.summary.pendingRecords || 0,
+      failedRecords: progress.summary.failedRecords || 0,
+
+      progressPercent: progress.summary.progressPercent || 0,
+    },
+
+    recentEvents: Array.isArray(progress.events)
+      ? progress.events.slice(0, 15)
+      : [],
+  };
+}
+
 export function getHistoricalSyncStatus(): any {
+  const progress = getSyncProgress();
+
   return {
     ...historicalSyncStatus,
-    progress: getSyncProgress(),
+    live: buildHistoricalLiveProgress(progress),
+    progress,
   };
 }
 
@@ -335,6 +437,14 @@ function createCrmPushProgressHandler() {
     });
 
     if (event.type === "batch_success") {
+      const _co = event.companyName ? ` [${event.companyName}]` : "";
+      const _dr =
+        event.fromDate && event.toDate
+          ? ` (${event.fromDate}→${event.toDate})`
+          : "";
+      console.log(
+        `[HISTORICAL]${_co} ${event.moduleName.padEnd(18)} ✅ Batch ${event.batchNo}/${event.totalBatches}${_dr} — ${event.uploadedRecords}/${event.totalRecords} records`,
+      );
       addSyncEvent({
         level: "info",
         message: `${event.moduleName}: batch ${event.batchNo}/${event.totalBatches} uploaded`,
@@ -350,6 +460,14 @@ function createCrmPushProgressHandler() {
     }
 
     if (event.type === "batch_failed") {
+      const _co = event.companyName ? ` [${event.companyName}]` : "";
+      const _dr =
+        event.fromDate && event.toDate
+          ? ` (${event.fromDate}→${event.toDate})`
+          : "";
+      console.error(
+        `[HISTORICAL]${_co} ${event.moduleName.padEnd(18)} ❌ Batch ${event.batchNo}/${event.totalBatches}${_dr} FAILED — ${event.errorMessage || "unknown error"}`,
+      );
       addSyncEvent({
         level: "error",
         message: `${event.moduleName}: batch ${event.batchNo}/${event.totalBatches} failed`,
@@ -361,6 +479,56 @@ function createCrmPushProgressHandler() {
       });
     }
   };
+}
+
+const HISTORICAL_MASTER_MODULES = ["ledgers", "stock-items", "cost-centers"];
+
+const HISTORICAL_RANGE_MODULES = [
+  "sales-orders",
+  "purchase-orders",
+  "outstandings",
+];
+
+function seedHistoricalProgressModules(input: {
+  companies: TallyCompanyForSync[];
+  dateRanges: TallyDateRange[];
+}) {
+  for (const company of input.companies) {
+    for (const moduleName of HISTORICAL_MASTER_MODULES) {
+      upsertModuleProgress({
+        moduleName,
+        companyName: company.name,
+        companyGuid: company.guid,
+        status: "pending",
+      });
+    }
+
+    for (const dateRange of input.dateRanges) {
+      for (const moduleName of HISTORICAL_RANGE_MODULES) {
+        upsertModuleProgress({
+          moduleName,
+          companyName: company.name,
+          companyGuid: company.guid,
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+          status: "pending",
+        });
+      }
+    }
+  }
+
+  addSyncEvent({
+    level: "info",
+    message: "Historical sync plan prepared",
+    details: {
+      companies: input.companies.length,
+      rangesPerCompany: input.dateRanges.length,
+      modulesTotal:
+        input.companies.length *
+        (HISTORICAL_MASTER_MODULES.length +
+          input.dateRanges.length * HISTORICAL_RANGE_MODULES.length),
+    },
+  });
 }
 
 async function syncCompanyMasters(company: TallyCompanyForSync) {
@@ -750,6 +918,11 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       request,
       companiesTotal: selectedCompanies.length,
       rangesTotal: selectedCompanies.length * dateRanges.length,
+    });
+
+    seedHistoricalProgressModules({
+      companies: selectedCompanies,
+      dateRanges,
     });
 
     const companyResults = [];

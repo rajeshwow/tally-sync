@@ -236,6 +236,16 @@ app.get("/sync/historical/status", requireControlToken, (_req, res) => {
   });
 });
 
+app.get("/sync/historical/progress", requireControlToken, (_req, res) => {
+  const status = getHistoricalSyncStatus();
+
+  return res.status(200).json({
+    statusCode: 200,
+    message: "Historical sync live progress fetched",
+    data: status.live,
+  });
+});
+
 app.post("/sync/historical", requireControlToken, (req, res) => {
   if (isManualSyncRunning) {
     return res.status(409).json({
