@@ -256,7 +256,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const costCentersXml = await fetchCostCentersXml(company.name);
@@ -269,7 +269,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const stockItemsXml = await fetchStockItemsXml(company.name);
@@ -281,7 +281,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
@@ -298,7 +298,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const purchaseOrdersXml = await fetchPurchaseOrdersXml(
@@ -318,7 +318,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
@@ -337,7 +337,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 50,
+      batchSize: 20,
     });
 
     const completedAt = new Date().toISOString();

@@ -59,7 +59,7 @@ export type PushProgressEvent = {
 };
 
 type PushOptions = {
-  batchSize?: number;
+  batchSize?: any;
   companyName?: string;
   companyGuid?: string | null;
   moduleName?: string;
@@ -97,7 +97,7 @@ async function postWithRetry(
     const status = err.response?.status;
     const canRetry =
       attempt < 3 &&
-      (!status || status === 408 || status === 429 || status >= 500);
+      (!status || status === 408 || status === 429 || status >= 20);
 
     console.error("[CRM CLIENT] Push failed", {
       url,
@@ -108,7 +108,7 @@ async function postWithRetry(
     });
 
     if (canRetry) {
-      await sleep(1000 * attempt);
+      await sleep(200 * attempt);
       return postWithRetry(url, body, attempt + 1);
     }
 
@@ -122,7 +122,7 @@ async function pushRecordsToCrm(
   options: PushOptions = {},
 ) {
   const safeRecords = Array.isArray(records) ? records : [];
-  const batchSize = options.batchSize || 200;
+  const batchSize = options.batchSize || 20;
   const batches = chunkArray(safeRecords, batchSize);
   const moduleName = options.moduleName || url;
 
@@ -226,6 +226,9 @@ async function pushRecordsToCrm(
         type: "batch_success",
         batchNo,
         batchRecords: batch.length,
+        totalRecords: safeRecords.length,
+        uploadedRecords: summary.uploadedRecords,
+        pendingRecords: summary.pendingRecords,
       });
     } catch (error: any) {
       summary.failedBatches += 1;
@@ -261,7 +264,7 @@ export async function pushLedgersToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/ledgers", records, {
     ...options,
-    batchSize: options.batchSize || 500,
+    batchSize: options.batchSize || 20,
     moduleName: "ledgers",
   });
 }
@@ -272,7 +275,7 @@ export async function pushStockItemsToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/stock-items", records, {
     ...options,
-    batchSize: options.batchSize || 500,
+    batchSize: options.batchSize || 20,
     moduleName: "stock-items",
   });
 }
@@ -283,7 +286,7 @@ export async function pushOutstandingsToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/outstandings", records, {
     ...options,
-    batchSize: options.batchSize || 100,
+    batchSize: options.batchSize || 20,
     moduleName: "outstandings",
   });
 }
@@ -294,7 +297,7 @@ export async function pushSalesOrdersToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/sales-orders", records, {
     ...options,
-    batchSize: options.batchSize || 100,
+    batchSize: options.batchSize || 20,
     moduleName: "sales-orders",
   });
 }
@@ -305,7 +308,7 @@ export async function pushPurchaseOrdersToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/purchase-orders", records, {
     ...options,
-    batchSize: options.batchSize || 100,
+    batchSize: options.batchSize || 20,
     moduleName: "purchase-orders",
   });
 }
@@ -316,7 +319,7 @@ export async function pushCostCentersToCrm(
 ) {
   return pushRecordsToCrm("/tally/pull/cost-centers", records, {
     ...options,
-    batchSize: options.batchSize || 500,
+    batchSize: options.batchSize || 20,
     moduleName: "cost-centers",
   });
 }
