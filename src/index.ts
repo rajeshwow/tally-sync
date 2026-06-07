@@ -270,27 +270,31 @@ app.post("/sync/historical", requireControlToken, (req, res) => {
   });
 });
 
-cron.schedule(SYNC_CRON, async () => {
-  try {
-    if (isManualSyncRunning) {
-      console.log("[CRON SYNC] Skipped because manual sync is running");
-      return;
+if (process.env.DISABLE_AUTO_SYNC !== "true") {
+  cron.schedule(SYNC_CRON, async () => {
+    try {
+      if (isManualSyncRunning) {
+        console.log("[CRON SYNC] Skipped because manual sync is running");
+        return;
+      }
+
+      if (isHistoricalSyncActive()) {
+        console.log("[CRON SYNC] Skipped because historical sync is running");
+        return;
+      }
+
+      console.log(`[CRON SYNC] Started at ${new Date().toISOString()}`);
+
+      const result = await runFullSync();
+
+      console.log("[CRON SYNC] Completed", JSON.stringify(result));
+    } catch (error: any) {
+      console.error("[CRON SYNC] Failed", error?.message || error);
     }
-
-    if (isHistoricalSyncActive()) {
-      console.log("[CRON SYNC] Skipped because historical sync is running");
-      return;
-    }
-
-    console.log(`[CRON SYNC] Started at ${new Date().toISOString()}`);
-
-    const result = await runFullSync();
-
-    console.log("[CRON SYNC] Completed", JSON.stringify(result));
-  } catch (error: any) {
-    console.error("[CRON SYNC] Failed", error?.message || error);
-  }
-});
+  });
+} else {
+  console.log("[CRON SYNC] Auto sync is disabled via DISABLE_AUTO_SYNC=true");
+}
 
 app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
   console.error("[AGENT ERROR]", error?.message || error);
