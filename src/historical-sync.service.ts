@@ -567,7 +567,7 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
-    batchSize: 500,
+    batchSize: 50,
     onProgress: createCrmPushProgressHandler(),
   });
 
@@ -597,7 +597,7 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
-    batchSize: 500,
+    batchSize: 50,
     onProgress: createCrmPushProgressHandler(),
   });
 
@@ -627,7 +627,7 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     companyName: company.name,
     companyGuid: company.guid,
     syncMode: "historical",
-    batchSize: 500,
+    batchSize: 50,
     onProgress: createCrmPushProgressHandler(),
   });
 
@@ -707,7 +707,7 @@ async function syncCompanyTransactionsByRange(input: {
       syncMode: "historical",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 100,
+      batchSize: 50,
       onProgress: createCrmPushProgressHandler(),
     });
 
@@ -747,7 +747,7 @@ async function syncCompanyTransactionsByRange(input: {
       syncMode: "historical",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 100,
+      batchSize: 50,
       onProgress: createCrmPushProgressHandler(),
     });
 
@@ -785,7 +785,7 @@ async function syncCompanyTransactionsByRange(input: {
       syncMode: "historical",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 100,
+      batchSize: 50,
       onProgress: createCrmPushProgressHandler(),
     });
 
