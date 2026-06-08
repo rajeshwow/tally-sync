@@ -296,7 +296,9 @@ if (process.env.DISABLE_AUTO_SYNC !== "true") {
     }
   });
 } else {
-  console.log("[CRON SYNC] Auto sync is disabled via DISABLE_AUTO_SYNC=true");
+  console.log(
+    "[CRON SYNC] Auto sync is disabled via DISABLE_AUTO_SYNC=true only",
+  );
 }
 
 app.use((error: any, _req: Request, res: Response, _next: NextFunction) => {
