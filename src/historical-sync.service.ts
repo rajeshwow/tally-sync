@@ -45,7 +45,7 @@ import {
 
 import {
   clearHistoricalSyncCheckpoints,
-  isSyncCheckpointSuccess,
+  getSyncCheckpoint,
   listHistoricalSyncCheckpoints,
   markSyncCheckpoint,
 } from "./sync-checkpoint.store";
@@ -651,13 +651,13 @@ function seedHistoricalProgressModules(input: {
   });
 }
 
-function isHistoricalModuleCompleted(input: {
+function getHistoricalModuleCheckpoint(input: {
   moduleName: string;
   company: TallyCompanyForSync;
   fromDate?: string | null;
   toDate?: string | null;
 }) {
-  return isSyncCheckpointSuccess({
+  return getSyncCheckpoint({
     mode: "historical",
     companyName: input.company.name,
     companyGuid: input.company.guid,
@@ -665,6 +665,46 @@ function isHistoricalModuleCompleted(input: {
     fromDate: input.fromDate || null,
     toDate: input.toDate || null,
   });
+}
+
+function shouldSkipHistoricalModule(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+  totalRecords: number;
+}) {
+  const checkpoint = getHistoricalModuleCheckpoint(input);
+
+  if (checkpoint?.status !== "success") {
+    return false;
+  }
+
+  const checkpointRecords = Number(checkpoint.totalRecords || 0);
+
+  /**
+   * Important safety guard:
+   * Older/current buggy runs may have saved success with 0 records.
+   * If this run has records, do not trust that stale checkpoint.
+   */
+  if (input.totalRecords > 0 && checkpointRecords <= 0) {
+    addSyncEvent({
+      level: "warn",
+      message: `${input.moduleName} checkpoint ignored because it had 0 records but current parse found ${input.totalRecords}`,
+      companyName: input.company.name,
+      moduleName: input.moduleName,
+      fromDate: input.fromDate || null,
+      toDate: input.toDate || null,
+      details: {
+        checkpointRecords,
+        currentRecords: input.totalRecords,
+      },
+    });
+
+    return false;
+  }
+
+  return true;
 }
 
 function markHistoricalModuleSkipped(input: {
@@ -782,7 +822,15 @@ async function uploadHistoricalModule(input: {
   const { moduleName, company, records, fromDate, toDate } = input;
   const totalRecords = Array.isArray(records) ? records.length : 0;
 
-  if (isHistoricalModuleCompleted({ moduleName, company, fromDate, toDate })) {
+  if (
+    shouldSkipHistoricalModule({
+      moduleName,
+      company,
+      fromDate,
+      toDate,
+      totalRecords,
+    })
+  ) {
     markHistoricalModuleSkipped({
       moduleName,
       company,
@@ -812,14 +860,25 @@ async function uploadHistoricalModule(input: {
       onProgress: createCrmPushProgressHandler(),
     });
 
-    markHistoricalModuleSuccess({
-      moduleName,
-      company,
-      fromDate,
-      toDate,
-      totalRecords,
-      uploadedRecords: result?.uploadedRecords ?? totalRecords,
-    });
+    if (totalRecords > 0) {
+      markHistoricalModuleSuccess({
+        moduleName,
+        company,
+        fromDate,
+        toDate,
+        totalRecords,
+        uploadedRecords: result?.uploadedRecords ?? totalRecords,
+      });
+    } else {
+      addSyncEvent({
+        level: "info",
+        message: `${moduleName} had 0 parsed records; checkpoint not saved so future historical runs can pick newly available data`,
+        companyName: company.name,
+        moduleName,
+        fromDate: fromDate || null,
+        toDate: toDate || null,
+      });
+    }
 
     return result;
   } catch (error: any) {
@@ -895,12 +954,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: ledgers.length,
   });
 
-  const ledgerResult = await uploadHistoricalModule({
-    moduleName: "ledgers",
-    company,
-    records: ledgers,
+  const ledgerResult = await pushLedgersToCrm(ledgers, {
+    companyName: company.name,
+    companyGuid: company.guid,
+    syncMode: "historical",
     batchSize: process.env.BATCH_SIZE_LEDGERS || 10,
-    push: pushLedgersToCrm,
+    onProgress: createCrmPushProgressHandler(),
   });
 
   upsertModuleProgress({
@@ -925,12 +984,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: stockItems.length,
   });
 
-  const stockItemResult = await uploadHistoricalModule({
-    moduleName: "stock-items",
-    company,
-    records: stockItems,
+  const stockItemResult = await pushStockItemsToCrm(stockItems, {
+    companyName: company.name,
+    companyGuid: company.guid,
+    syncMode: "historical",
     batchSize: process.env.BATCH_SIZE_STOCK_ITEMS || 10,
-    push: pushStockItemsToCrm,
+    onProgress: createCrmPushProgressHandler(),
   });
 
   upsertModuleProgress({
@@ -955,12 +1014,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: costCenters.length,
   });
 
-  const costCenterResult = await uploadHistoricalModule({
-    moduleName: "cost-centers",
-    company,
-    records: costCenters,
+  const costCenterResult = await pushCostCentersToCrm(costCenters, {
+    companyName: company.name,
+    companyGuid: company.guid,
+    syncMode: "historical",
     batchSize: process.env.BATCH_SIZE_COST_CENTERS || 10,
-    push: pushCostCentersToCrm,
+    onProgress: createCrmPushProgressHandler(),
   });
 
   console.log("[HISTORICAL SYNC] Masters completed", {
