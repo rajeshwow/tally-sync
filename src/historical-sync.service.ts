@@ -43,11 +43,35 @@ import {
   upsertModuleProgress,
 } from "./sync-progress.store";
 
+import {
+  clearHistoricalSyncCheckpoints,
+  isSyncCheckpointSuccess,
+  listHistoricalSyncCheckpoints,
+  markSyncCheckpoint,
+} from "./sync-checkpoint.store";
+
 let isHistoricalSyncRunning = false;
 
 type HistoricalSyncRequest = {
+  /**
+   * Optional legacy input. Prefer fromDate.
+   * If fromDate is missing and startYear exists, fromDate becomes `${startYear}0401`.
+   */
   startYear?: number;
+  /** Tally date format: YYYYMMDD. Example: 20160401 */
+  fromDate?: string;
+  /** Tally date format: YYYYMMDD. Defaults to today. */
+  toDate?: string;
   companyName?: string;
+  /** Clear historical checkpoints and run everything again. */
+  forceRestart?: boolean;
+};
+
+type NormalizedHistoricalSyncRequest = {
+  fromDate: string;
+  toDate: string;
+  companyName: string;
+  forceRestart: boolean;
 };
 
 type HistoricalSyncStatus = {
@@ -56,7 +80,7 @@ type HistoricalSyncStatus = {
   startedAt: string | null;
   completedAt: string | null;
   error: string | null;
-  request: Required<HistoricalSyncRequest> | null;
+  request: NormalizedHistoricalSyncRequest | null;
   lastResult: any;
 };
 
@@ -77,6 +101,13 @@ type TallyCompanyForSync = {
   country?: string | null;
   booksFrom?: string | null;
   startingFrom?: string | null;
+};
+
+type HistoricalCompanyPlan = {
+  company: TallyCompanyForSync;
+  fromDate: string;
+  toDate: string;
+  dateRanges: TallyDateRange[];
 };
 
 function decodeXml(value: string) {
@@ -185,6 +216,81 @@ function normalizeName(value: any) {
     .replace(/\s+/g, " ");
 }
 
+function normalizeTallyDate(value?: string | null): string | null {
+  const raw = String(value || "").trim();
+
+  if (!raw) return null;
+
+  const compact = raw.replace(/[^0-9]/g, "");
+
+  if (/^\d{8}$/.test(compact)) {
+    // Already YYYYMMDD.
+    if (Number(compact.slice(0, 4)) > 1900) return compact;
+
+    // DDMMYYYY fallback.
+    return `${compact.slice(4, 8)}${compact.slice(2, 4)}${compact.slice(0, 2)}`;
+  }
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return formatTallyDate(parsed);
+  }
+
+  return null;
+}
+
+function parseTallyDate(value: string): Date {
+  const normalized = normalizeTallyDate(value);
+
+  if (!normalized) {
+    throw new Error(`Invalid Tally date: ${value}`);
+  }
+
+  const year = Number(normalized.slice(0, 4));
+  const month = Number(normalized.slice(4, 6)) - 1;
+  const day = Number(normalized.slice(6, 8));
+
+  return new Date(year, month, day);
+}
+
+function resolveRequestFromDate(input?: HistoricalSyncRequest) {
+  const directFromDate = normalizeTallyDate(input?.fromDate);
+  if (directFromDate) return directFromDate;
+
+  const envFromDate =
+    normalizeTallyDate(process.env.HISTORICAL_SYNC_FROM_DATE) ||
+    normalizeTallyDate(process.env.TALLY_FROM_DATE);
+
+  if (envFromDate) return envFromDate;
+
+  if (input?.startYear) {
+    return `${Number(input.startYear)}0401`;
+  }
+
+  return "";
+}
+
+function resolveRequestToDate(input?: HistoricalSyncRequest) {
+  return (
+    normalizeTallyDate(input?.toDate) ||
+    normalizeTallyDate(process.env.HISTORICAL_SYNC_TO_DATE) ||
+    normalizeTallyDate(process.env.TALLY_TO_DATE) ||
+    formatTallyDate(new Date())
+  );
+}
+
+function resolveCompanyHistoricalFromDate(
+  company: TallyCompanyForSync,
+  request: NormalizedHistoricalSyncRequest,
+) {
+  return (
+    request.fromDate ||
+    normalizeTallyDate(company.booksFrom) ||
+    normalizeTallyDate(company.startingFrom) ||
+    ""
+  );
+}
+
 function enrichOutstandingsWithLedgerGuid(outstandings: any[], ledgers: any[]) {
   const ledgerByName = new Map<string, any>();
 
@@ -237,55 +343,52 @@ function getRangeChunkMonths() {
 }
 
 function buildHistoricalDateRanges(input: {
-  startYear: number;
-  endDate?: Date;
+  fromDate: string;
+  toDate?: string;
 }): TallyDateRange[] {
-  const today = input.endDate || new Date();
+  const fromDate = parseTallyDate(input.fromDate);
+  const toDate = parseTallyDate(input.toDate || formatTallyDate(new Date()));
+
+  if (fromDate > toDate) {
+    throw new Error(
+      `Historical fromDate cannot be greater than toDate: ${input.fromDate} > ${input.toDate}`,
+    );
+  }
+
   const ranges: TallyDateRange[] = [];
   const chunkMonths = getRangeChunkMonths();
+  let rangeStart = new Date(fromDate);
 
-  const currentFinancialYear =
-    today.getMonth() + 1 >= 4 ? today.getFullYear() : today.getFullYear() - 1;
+  while (rangeStart <= toDate) {
+    const rangeEnd = new Date(
+      rangeStart.getFullYear(),
+      rangeStart.getMonth() + chunkMonths,
+      0,
+    );
 
-  for (let year = input.startYear; year <= currentFinancialYear; year++) {
-    const financialYearStart = new Date(year, 3, 1);
-    const financialYearEnd = new Date(year + 1, 2, 31);
+    ranges.push({
+      fromDate: formatTallyDate(rangeStart),
+      toDate: formatTallyDate(rangeEnd > toDate ? toDate : rangeEnd),
+    });
 
-    for (
-      let rangeStart = new Date(financialYearStart);
-      rangeStart <= financialYearEnd && rangeStart <= today;
-      rangeStart = new Date(
-        rangeStart.getFullYear(),
-        rangeStart.getMonth() + chunkMonths,
-        1,
-      )
-    ) {
-      const rangeEnd = new Date(
-        rangeStart.getFullYear(),
-        rangeStart.getMonth() + chunkMonths,
-        0,
-      );
-
-      ranges.push({
-        fromDate: formatTallyDate(rangeStart),
-        toDate: formatTallyDate(
-          rangeEnd > today
-            ? today
-            : rangeEnd > financialYearEnd
-              ? financialYearEnd
-              : rangeEnd,
-        ),
-      });
-    }
+    rangeStart = new Date(
+      rangeEnd.getFullYear(),
+      rangeEnd.getMonth(),
+      rangeEnd.getDate() + 1,
+    );
   }
 
   return ranges;
 }
 
-function normalizeHistoricalRequest(input?: HistoricalSyncRequest) {
+function normalizeHistoricalRequest(
+  input?: HistoricalSyncRequest,
+): NormalizedHistoricalSyncRequest {
   return {
-    startYear: Number(input?.startYear || 2022),
+    fromDate: resolveRequestFromDate(input),
+    toDate: resolveRequestToDate(input),
     companyName: input?.companyName || "",
+    forceRestart: Boolean(input?.forceRestart),
   };
 }
 
@@ -397,11 +500,19 @@ function buildHistoricalLiveProgress(progress: any) {
 
 export function getHistoricalSyncStatus(): any {
   const progress = getSyncProgress();
+  const checkpoints = listHistoricalSyncCheckpoints();
 
   return {
     ...historicalSyncStatus,
     live: buildHistoricalLiveProgress(progress),
     progress,
+    checkpoints: {
+      total: checkpoints.length,
+      success: checkpoints.filter((item) => item.status === "success").length,
+      failed: checkpoints.filter((item) => item.status === "failed").length,
+      running: checkpoints.filter((item) => item.status === "running").length,
+      records: checkpoints.slice(-50),
+    },
   };
 }
 
@@ -490,25 +601,24 @@ const HISTORICAL_RANGE_MODULES = [
 ];
 
 function seedHistoricalProgressModules(input: {
-  companies: TallyCompanyForSync[];
-  dateRanges: TallyDateRange[];
+  plans: HistoricalCompanyPlan[];
 }) {
-  for (const company of input.companies) {
+  for (const plan of input.plans) {
     for (const moduleName of HISTORICAL_MASTER_MODULES) {
       upsertModuleProgress({
         moduleName,
-        companyName: company.name,
-        companyGuid: company.guid,
+        companyName: plan.company.name,
+        companyGuid: plan.company.guid,
         status: "pending",
       });
     }
 
-    for (const dateRange of input.dateRanges) {
+    for (const dateRange of plan.dateRanges) {
       for (const moduleName of HISTORICAL_RANGE_MODULES) {
         upsertModuleProgress({
           moduleName,
-          companyName: company.name,
-          companyGuid: company.guid,
+          companyName: plan.company.name,
+          companyGuid: plan.company.guid,
           fromDate: dateRange.fromDate,
           toDate: dateRange.toDate,
           status: "pending",
@@ -517,17 +627,239 @@ function seedHistoricalProgressModules(input: {
     }
   }
 
+  const rangesTotal = input.plans.reduce(
+    (sum, plan) => sum + plan.dateRanges.length,
+    0,
+  );
+
+  const modulesTotal = input.plans.reduce(
+    (sum, plan) =>
+      sum +
+      HISTORICAL_MASTER_MODULES.length +
+      plan.dateRanges.length * HISTORICAL_RANGE_MODULES.length,
+    0,
+  );
+
   addSyncEvent({
     level: "info",
     message: "Historical sync plan prepared",
     details: {
-      companies: input.companies.length,
-      rangesPerCompany: input.dateRanges.length,
-      modulesTotal:
-        input.companies.length *
-        (HISTORICAL_MASTER_MODULES.length +
-          input.dateRanges.length * HISTORICAL_RANGE_MODULES.length),
+      companies: input.plans.length,
+      rangesTotal,
+      modulesTotal,
     },
+  });
+}
+
+function isHistoricalModuleCompleted(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+}) {
+  return isSyncCheckpointSuccess({
+    mode: "historical",
+    companyName: input.company.name,
+    companyGuid: input.company.guid,
+    moduleName: input.moduleName,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+  });
+}
+
+function markHistoricalModuleSkipped(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+  totalRecords?: number;
+}) {
+  const totalRecords = input.totalRecords || 0;
+
+  upsertModuleProgress({
+    moduleName: input.moduleName,
+    companyName: input.company.name,
+    companyGuid: input.company.guid,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+    status: "skipped",
+    totalRecords,
+    uploadedRecords: totalRecords,
+    pendingRecords: 0,
+    failedRecords: 0,
+    completedAt: new Date().toISOString(),
+  });
+
+  addSyncEvent({
+    level: "info",
+    message: `${input.moduleName} skipped because checkpoint already exists`,
+    companyName: input.company.name,
+    moduleName: input.moduleName,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+  });
+}
+
+function markHistoricalModuleRunning(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+}) {
+  markSyncCheckpoint({
+    mode: "historical",
+    companyName: input.company.name,
+    companyGuid: input.company.guid,
+    moduleName: input.moduleName,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    errorMessage: null,
+  });
+}
+
+function markHistoricalModuleSuccess(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+  totalRecords?: number;
+  uploadedRecords?: number;
+}) {
+  markSyncCheckpoint({
+    mode: "historical",
+    companyName: input.company.name,
+    companyGuid: input.company.guid,
+    moduleName: input.moduleName,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+    status: "success",
+    totalRecords: input.totalRecords || 0,
+    uploadedRecords: input.uploadedRecords ?? input.totalRecords ?? 0,
+    failedRecords: 0,
+    completedAt: new Date().toISOString(),
+    errorMessage: null,
+  });
+}
+
+function markHistoricalModuleFailed(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  fromDate?: string | null;
+  toDate?: string | null;
+  totalRecords?: number;
+  uploadedRecords?: number;
+  failedRecords?: number;
+  errorMessage?: string | null;
+}) {
+  markSyncCheckpoint({
+    mode: "historical",
+    companyName: input.company.name,
+    companyGuid: input.company.guid,
+    moduleName: input.moduleName,
+    fromDate: input.fromDate || null,
+    toDate: input.toDate || null,
+    status: "failed",
+    totalRecords: input.totalRecords || 0,
+    uploadedRecords: input.uploadedRecords || 0,
+    failedRecords: input.failedRecords || 0,
+    completedAt: new Date().toISOString(),
+    errorMessage: input.errorMessage || "Historical module sync failed",
+  });
+}
+
+async function uploadHistoricalModule(input: {
+  moduleName: string;
+  company: TallyCompanyForSync;
+  records: any[];
+  fromDate?: string | null;
+  toDate?: string | null;
+  batchSize: any;
+  push: (records: any[], options: any) => Promise<any>;
+}) {
+  const { moduleName, company, records, fromDate, toDate } = input;
+  const totalRecords = Array.isArray(records) ? records.length : 0;
+
+  if (isHistoricalModuleCompleted({ moduleName, company, fromDate, toDate })) {
+    markHistoricalModuleSkipped({
+      moduleName,
+      company,
+      fromDate,
+      toDate,
+      totalRecords,
+    });
+
+    return {
+      skipped: true,
+      moduleName,
+      totalRecords,
+      uploadedRecords: totalRecords,
+    };
+  }
+
+  markHistoricalModuleRunning({ moduleName, company, fromDate, toDate });
+
+  try {
+    const result = await input.push(records, {
+      companyName: company.name,
+      companyGuid: company.guid,
+      syncMode: "historical",
+      fromDate: fromDate || undefined,
+      toDate: toDate || undefined,
+      batchSize: input.batchSize,
+      onProgress: createCrmPushProgressHandler(),
+    });
+
+    markHistoricalModuleSuccess({
+      moduleName,
+      company,
+      fromDate,
+      toDate,
+      totalRecords,
+      uploadedRecords: result?.uploadedRecords ?? totalRecords,
+    });
+
+    return result;
+  } catch (error: any) {
+    markHistoricalModuleFailed({
+      moduleName,
+      company,
+      fromDate,
+      toDate,
+      totalRecords,
+      errorMessage: error?.message || "Historical module sync failed",
+    });
+
+    throw error;
+  }
+}
+
+function buildHistoricalCompanyPlans(input: {
+  companies: TallyCompanyForSync[];
+  request: NormalizedHistoricalSyncRequest;
+}): HistoricalCompanyPlan[] {
+  return input.companies.map((company) => {
+    const fromDate = resolveCompanyHistoricalFromDate(company, input.request);
+
+    if (!fromDate) {
+      throw new Error(
+        `Historical fromDate missing for company "${company.name}". Send {"fromDate":"YYYYMMDD"} or make sure Tally company has BooksFrom/StartingFrom.`,
+      );
+    }
+
+    const dateRanges = buildHistoricalDateRanges({
+      fromDate,
+      toDate: input.request.toDate,
+    });
+
+    return {
+      company,
+      fromDate,
+      toDate: input.request.toDate,
+      dateRanges,
+    };
   });
 }
 
@@ -563,12 +895,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: ledgers.length,
   });
 
-  const ledgerResult = await pushLedgersToCrm(ledgers, {
-    companyName: company.name,
-    companyGuid: company.guid,
-    syncMode: "historical",
-    batchSize: process.env.BATCH_SIZE_LEDGERS || 20,
-    onProgress: createCrmPushProgressHandler(),
+  const ledgerResult = await uploadHistoricalModule({
+    moduleName: "ledgers",
+    company,
+    records: ledgers,
+    batchSize: process.env.BATCH_SIZE_LEDGERS || 10,
+    push: pushLedgersToCrm,
   });
 
   upsertModuleProgress({
@@ -593,12 +925,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: stockItems.length,
   });
 
-  const stockItemResult = await pushStockItemsToCrm(stockItems, {
-    companyName: company.name,
-    companyGuid: company.guid,
-    syncMode: "historical",
-    batchSize: process.env.BATCH_SIZE_STOCK_ITEMS || 20,
-    onProgress: createCrmPushProgressHandler(),
+  const stockItemResult = await uploadHistoricalModule({
+    moduleName: "stock-items",
+    company,
+    records: stockItems,
+    batchSize: process.env.BATCH_SIZE_STOCK_ITEMS || 10,
+    push: pushStockItemsToCrm,
   });
 
   upsertModuleProgress({
@@ -623,12 +955,12 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     pendingRecords: costCenters.length,
   });
 
-  const costCenterResult = await pushCostCentersToCrm(costCenters, {
-    companyName: company.name,
-    companyGuid: company.guid,
-    syncMode: "historical",
-    batchSize: process.env.BATCH_SIZE_COST_CENTERS || 20,
-    onProgress: createCrmPushProgressHandler(),
+  const costCenterResult = await uploadHistoricalModule({
+    moduleName: "cost-centers",
+    company,
+    records: costCenters,
+    batchSize: process.env.BATCH_SIZE_COST_CENTERS || 10,
+    push: pushCostCentersToCrm,
   });
 
   console.log("[HISTORICAL SYNC] Masters completed", {
@@ -701,14 +1033,14 @@ async function syncCompanyTransactionsByRange(input: {
       pendingRecords: salesOrders.length,
     });
 
-    const salesOrderResult = await pushSalesOrdersToCrm(salesOrders, {
-      companyName: company.name,
-      companyGuid: company.guid,
-      syncMode: "historical",
+    const salesOrderResult = await uploadHistoricalModule({
+      moduleName: "sales-orders",
+      company,
+      records: salesOrders,
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: process.env.BATCH_SIZE_SALES_ORDERS || 20,
-      onProgress: createCrmPushProgressHandler(),
+      batchSize: process.env.BATCH_SIZE_SALES_ORDERS || 5,
+      push: pushSalesOrdersToCrm,
     });
 
     upsertModuleProgress({
@@ -741,14 +1073,14 @@ async function syncCompanyTransactionsByRange(input: {
       pendingRecords: purchaseOrders.length,
     });
 
-    const purchaseOrderResult = await pushPurchaseOrdersToCrm(purchaseOrders, {
-      companyName: company.name,
-      companyGuid: company.guid,
-      syncMode: "historical",
+    const purchaseOrderResult = await uploadHistoricalModule({
+      moduleName: "purchase-orders",
+      company,
+      records: purchaseOrders,
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: process.env.BATCH_SIZE_PURCHASE_ORDERS || 20,
-      onProgress: createCrmPushProgressHandler(),
+      batchSize: process.env.BATCH_SIZE_PURCHASE_ORDERS || 5,
+      push: pushPurchaseOrdersToCrm,
     });
 
     upsertModuleProgress({
@@ -779,14 +1111,14 @@ async function syncCompanyTransactionsByRange(input: {
       pendingRecords: outstandings.length,
     });
 
-    const outstandingResult = await pushOutstandingsToCrm(outstandings, {
-      companyName: company.name,
-      companyGuid: company.guid,
-      syncMode: "historical",
+    const outstandingResult = await uploadHistoricalModule({
+      moduleName: "outstandings",
+      company,
+      records: outstandings,
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: process.env.BATCH_SIZE_OUTSTANDINGS || 20,
-      onProgress: createCrmPushProgressHandler(),
+      batchSize: process.env.BATCH_SIZE_OUTSTANDINGS || 5,
+      push: pushOutstandingsToCrm,
     });
 
     await markHistoricalSyncProgressInCrm({
@@ -874,11 +1206,11 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
   });
 
   try {
-    const startYear = request.startYear;
-
     console.log("[HISTORICAL SYNC] Started", {
-      startYear,
+      fromDate: request.fromDate || "TALLY_COMPANY_BOOKS_FROM",
+      toDate: request.toDate,
       companyName: request.companyName || "ALL",
+      forceRestart: request.forceRestart,
     });
 
     const companies = await getCompaniesForHistoricalSync();
@@ -909,28 +1241,51 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       return result;
     }
 
-    const dateRanges = buildHistoricalDateRanges({
-      startYear,
+    if (request.forceRestart) {
+      for (const company of selectedCompanies) {
+        clearHistoricalSyncCheckpoints({
+          companyName: company.name,
+          companyGuid: company.guid,
+        });
+      }
+
+      addSyncEvent({
+        level: "warn",
+        message:
+          "Historical sync checkpoints cleared because forceRestart=true",
+        details: { companyName: request.companyName || "ALL" },
+      });
+    }
+
+    const companyPlans = buildHistoricalCompanyPlans({
+      companies: selectedCompanies,
+      request,
     });
+
+    const rangesTotal = companyPlans.reduce(
+      (sum, plan) => sum + plan.dateRanges.length,
+      0,
+    );
 
     startSyncProgress({
       mode: "historical",
       request,
       companiesTotal: selectedCompanies.length,
-      rangesTotal: selectedCompanies.length * dateRanges.length,
+      rangesTotal,
     });
 
     seedHistoricalProgressModules({
-      companies: selectedCompanies,
-      dateRanges,
+      plans: companyPlans,
     });
 
     const companyResults = [];
 
-    for (const [companyIndex, company] of selectedCompanies.entries()) {
+    for (const [companyIndex, plan] of companyPlans.entries()) {
+      const { company, dateRanges } = plan;
+
       setActiveCompany({
         index: companyIndex + 1,
-        total: selectedCompanies.length,
+        total: companyPlans.length,
         name: company.name,
         guid: company.guid,
       });
@@ -940,6 +1295,9 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       console.log("[HISTORICAL SYNC] Company started", {
         company: company.name,
         guid: company.guid,
+        fromDate: plan.fromDate,
+        toDate: plan.toDate,
+        ranges: dateRanges.length,
       });
 
       try {
@@ -978,6 +1336,8 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
 
         companyResults.push({
           company,
+          fromDate: plan.fromDate,
+          toDate: plan.toDate,
           masters: masterResult.counts,
           ranges: rangeResults,
         });
@@ -1017,7 +1377,13 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
         count: selectedCompanies.length,
         records: selectedCompanies,
       },
-      ranges: dateRanges,
+      plans: companyPlans.map((plan) => ({
+        companyName: plan.company.name,
+        companyGuid: plan.company.guid || null,
+        fromDate: plan.fromDate,
+        toDate: plan.toDate,
+        ranges: plan.dateRanges.length,
+      })),
       companyResults,
     };
 

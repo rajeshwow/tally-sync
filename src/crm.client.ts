@@ -69,11 +69,22 @@ type PushOptions = {
   onProgress?: (event: PushProgressEvent) => void;
 };
 
+function normalizeBatchSize(value: any, fallback = 20) {
+  const batchSize = Number(value);
+
+  if (!Number.isFinite(batchSize) || batchSize <= 0) {
+    return fallback;
+  }
+
+  return Math.floor(batchSize);
+}
+
 function chunkArray<T>(records: T[], size: number): T[][] {
   const chunks: T[][] = [];
+  const safeSize = normalizeBatchSize(size, 20);
 
-  for (let i = 0; i < records.length; i += size) {
-    chunks.push(records.slice(i, i + size));
+  for (let i = 0; i < records.length; i += safeSize) {
+    chunks.push(records.slice(i, i + safeSize));
   }
 
   return chunks;
@@ -97,7 +108,7 @@ async function postWithRetry(
     const status = err.response?.status;
     const canRetry =
       attempt < 3 &&
-      (!status || status === 408 || status === 429 || status >= 20);
+      (!status || status === 408 || status === 429 || status >= 500);
 
     console.error("[CRM CLIENT] Push failed", {
       url,
@@ -122,7 +133,7 @@ async function pushRecordsToCrm(
   options: PushOptions = {},
 ) {
   const safeRecords = Array.isArray(records) ? records : [];
-  const batchSize = options.batchSize || 20;
+  const batchSize = normalizeBatchSize(options.batchSize, 20);
   const batches = chunkArray(safeRecords, batchSize);
   const moduleName = options.moduleName || url;
 

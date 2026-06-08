@@ -259,8 +259,11 @@ app.post("/sync/historical", requireControlToken, (req, res) => {
   }
 
   const result = startHistoricalSyncInBackground({
-    startYear: Number(req.body?.startYear || 2022),
+    startYear: req.body?.startYear ? Number(req.body.startYear) : undefined,
+    fromDate: req.body?.fromDate || undefined,
+    toDate: req.body?.toDate || undefined,
     companyName: req.body?.companyName || undefined,
+    forceRestart: Boolean(req.body?.forceRestart),
   });
 
   return res.status(result.started ? 202 : 409).json({
