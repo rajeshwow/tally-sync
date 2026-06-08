@@ -69,6 +69,20 @@ type PushOptions = {
   onProgress?: (event: PushProgressEvent) => void;
 };
 
+function chunkArray<T>(records: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+
+  for (let i = 0; i < records.length; i += size) {
+    chunks.push(records.slice(i, i + size));
+  }
+
+  return chunks;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function normalizeBatchSize(value: any, fallback = 20) {
   const batchSize = Number(value);
 
@@ -79,19 +93,116 @@ function normalizeBatchSize(value: any, fallback = 20) {
   return Math.floor(batchSize);
 }
 
-function chunkArray<T>(records: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  const safeSize = normalizeBatchSize(size, 20);
+function buildCrmPayload(input: {
+  moduleName: string;
+  batch: any[];
+  meta: Record<string, any>;
+}) {
+  const payload: Record<string, any> = {
+    records: input.batch,
+    meta: input.meta,
+  };
 
-  for (let i = 0; i < records.length; i += safeSize) {
-    chunks.push(records.slice(i, i + safeSize));
+  /**
+   * Keep records as primary payload.
+   * Add backward-compatible aliases only for transaction modules so existing
+   * backend handlers that read module-specific arrays also work.
+   */
+  if (input.moduleName === "sales-orders") {
+    payload.salesOrders = input.batch;
+    payload.sales_orders = input.batch;
+    payload.orders = input.batch;
   }
 
-  return chunks;
+  if (input.moduleName === "purchase-orders") {
+    payload.purchaseOrders = input.batch;
+    payload.purchase_orders = input.batch;
+    payload.orders = input.batch;
+  }
+
+  if (input.moduleName === "outstandings") {
+    payload.outstandings = input.batch;
+    payload.outstandingRecords = input.batch;
+    payload.outstanding_records = input.batch;
+  }
+
+  return payload;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function extractCrmSyncCounts(response: any) {
+  const data = response?.data || response || {};
+
+  const total = Number(
+    data.total ??
+      data.totalRecords ??
+      data.total_records ??
+      data.totalCount ??
+      data.total_count ??
+      data.count ??
+      0,
+  );
+
+  const success = Number(
+    data.success ??
+      data.successCount ??
+      data.success_count ??
+      data.inserted ??
+      data.updated ??
+      data.upserted ??
+      data.synced ??
+      data.saved ??
+      0,
+  );
+
+  const failed = Number(
+    data.failed ?? data.failedCount ?? data.failed_count ?? data.errors ?? 0,
+  );
+
+  return {
+    total: Number.isFinite(total) ? total : 0,
+    success: Number.isFinite(success) ? success : 0,
+    failed: Number.isFinite(failed) ? failed : 0,
+    jobId: data.job_id || data.jobId || null,
+  };
+}
+
+function shouldStrictlyValidateModule(moduleName: string) {
+  return ["sales-orders", "purchase-orders", "outstandings"].includes(
+    moduleName,
+  );
+}
+
+function validateCrmBatchResult(input: {
+  moduleName: string;
+  batchLabel: string;
+  batchRecords: number;
+  response: any;
+}) {
+  if (!shouldStrictlyValidateModule(input.moduleName)) return;
+
+  const counts = extractCrmSyncCounts(input.response);
+
+  console.log(
+    `[CRM CLIENT] ${input.moduleName} batch ${input.batchLabel} CRM result`,
+    {
+      total: counts.total,
+      success: counts.success,
+      failed: counts.failed,
+      jobId: counts.jobId,
+    },
+  );
+
+  if (input.batchRecords > 0 && counts.failed > 0) {
+    throw new Error(
+      `[CRM CLIENT] ${input.moduleName} batch ${input.batchLabel} was accepted by CRM but ${counts.failed}/${counts.total || input.batchRecords} records failed in backend. JobId=${counts.jobId || "N/A"}. Check CRM tally_sync_errors for exact DB error.`,
+    );
+  }
+
+  if (input.batchRecords > 0 && counts.total > 0 && counts.success === 0) {
+    throw new Error(
+      `[CRM CLIENT] ${input.moduleName} batch ${input.batchLabel} inserted 0/${counts.total} records in backend. JobId=${counts.jobId || "N/A"}. Check CRM tally_sync_errors for exact DB error.`,
+    );
+  }
 }
 
 async function postWithRetry(
@@ -206,23 +317,35 @@ async function pushRecordsToCrm(
     });
 
     try {
-      const result = await postWithRetry(url, {
-        records: batch,
-        meta: {
-          company_name: options.companyName || null,
-          company_guid: options.companyGuid || null,
-          module_name: options.moduleName || null,
-          sync_mode: options.syncMode || "incremental",
-          from_date: options.fromDate || null,
-          to_date: options.toDate || null,
-          batch_no: batchNo,
-          total_batches: batches.length,
-          batch_size: batch.length,
-        },
+      const meta = {
+        company_name: options.companyName || null,
+        company_guid: options.companyGuid || null,
+        module_name: options.moduleName || null,
+        sync_mode: options.syncMode || "incremental",
+        from_date: options.fromDate || null,
+        to_date: options.toDate || null,
+        batch_no: batchNo,
+        total_batches: batches.length,
+        batch_size: batch.length,
+      };
+
+      const result = await postWithRetry(
+        url,
+        buildCrmPayload({ moduleName, batch, meta }),
+      );
+
+      validateCrmBatchResult({
+        moduleName,
+        batchLabel,
+        batchRecords: batch.length,
+        response: result,
       });
 
+      const crmCounts = extractCrmSyncCounts(result);
+      const uploadedRecordCount = crmCounts.success || batch.length;
+
       summary.successBatches += 1;
-      summary.uploadedRecords += batch.length;
+      summary.uploadedRecords += uploadedRecordCount;
       summary.pendingRecords = Math.max(
         safeRecords.length - summary.uploadedRecords - summary.failedRecords,
         0,
