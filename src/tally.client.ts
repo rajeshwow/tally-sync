@@ -61,6 +61,22 @@ function buildDateRangeVariables(dateRange?: TallyDateRange) {
 `;
 }
 
+function buildDateRangeFilterFormula(dateRange?: TallyDateRange) {
+  if (!dateRange?.fromDate || !dateRange?.toDate) {
+    return `
+          <SYSTEM TYPE="Formulae" NAME="DateInSelectedRange">
+            Yes
+          </SYSTEM>
+`;
+  }
+
+  return `
+          <SYSTEM TYPE="Formulae" NAME="DateInSelectedRange">
+            $Date &gt;= ##SVFromDate AND $Date &lt;= ##SVToDate
+          </SYSTEM>
+`;
+}
+
 export async function fetchLedgersXml(companyName?: string) {
   const xml = `
 <ENVELOPE>
@@ -157,11 +173,13 @@ export async function fetchOutstandingsXml(
               CostCentreAllocations
             </FETCH>
             <FILTER>OnlyAccountingVouchers</FILTER>
+            <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlyAccountingVouchers">
             NOT $$IsOrder:$VoucherTypeName
           </SYSTEM>
+          ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -214,11 +232,13 @@ export async function fetchSalesOrdersXml(
               AllInventoryEntries
             </FETCH>
             <FILTER>OnlySalesVouchers</FILTER>
+            <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlySalesVouchers">
-            $$IsSales:$VoucherTypeName
+            $$IsSales:$VoucherTypeName OR $$IsOrder:$VoucherTypeName
           </SYSTEM>
+          ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -271,11 +291,13 @@ export async function fetchPurchaseOrdersXml(
               AllInventoryEntries
             </FETCH>
             <FILTER>OnlyPurchaseVouchers</FILTER>
+            <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlyPurchaseVouchers">
-            $$IsPurchase:$VoucherTypeName
+            $$IsPurchase:$VoucherTypeName OR $$IsOrder:$VoucherTypeName
           </SYSTEM>
+          ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
     </DESC>
