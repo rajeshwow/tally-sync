@@ -221,13 +221,60 @@ function normalizeTallyDate(value?: string | null): string | null {
 
   if (!raw) return null;
 
+  const monthMap: Record<string, string> = {
+    jan: "01",
+    january: "01",
+    feb: "02",
+    february: "02",
+    mar: "03",
+    march: "03",
+    apr: "04",
+    april: "04",
+    may: "05",
+    jun: "06",
+    june: "06",
+    jul: "07",
+    july: "07",
+    aug: "08",
+    august: "08",
+    sep: "09",
+    sept: "09",
+    september: "09",
+    oct: "10",
+    october: "10",
+    nov: "11",
+    november: "11",
+    dec: "12",
+    december: "12",
+  };
+
+  const tallyTextDate = raw.match(
+    /^(\d{1,2})[-/\s]+([a-zA-Z]{3,9})[-/\s]+(\d{2,4})$/,
+  );
+
+  if (tallyTextDate) {
+    const day = tallyTextDate[1].padStart(2, "0");
+    const month = monthMap[tallyTextDate[2].toLowerCase()];
+    let year = Number(tallyTextDate[3]);
+
+    if (!month) return null;
+
+    if (year < 100) {
+      year = year >= 70 ? 1900 + year : 2000 + year;
+    }
+
+    if (year > 1900) {
+      return `${year}${month}${day}`;
+    }
+  }
+
   const compact = raw.replace(/[^0-9]/g, "");
 
   if (/^\d{8}$/.test(compact)) {
-    // Already YYYYMMDD.
+    // YYYYMMDD
     if (Number(compact.slice(0, 4)) > 1900) return compact;
 
-    // DDMMYYYY fallback.
+    // DDMMYYYY fallback
     return `${compact.slice(4, 8)}${compact.slice(2, 4)}${compact.slice(0, 2)}`;
   }
 
@@ -279,12 +326,240 @@ function resolveRequestToDate(input?: HistoricalSyncRequest) {
   );
 }
 
-function resolveCompanyHistoricalFromDate(
+function isHistoricalAutoDetectEnabled() {
+  return (
+    String(process.env.HISTORICAL_SYNC_AUTO_DETECT_FROM_DATE || "true")
+      .trim()
+      .toLowerCase() !== "false"
+  );
+}
+
+function getHistoricalAutoDetectFromDate() {
+  const direct =
+    normalizeTallyDate(process.env.HISTORICAL_SYNC_SCAN_FROM_DATE) ||
+    normalizeTallyDate(process.env.HISTORICAL_SCAN_FROM_DATE);
+
+  if (direct) return direct;
+
+  const minYear = Number(process.env.HISTORICAL_SYNC_MIN_YEAR || 2000);
+
+  if (!Number.isFinite(minYear) || minYear < 1900) {
+    return "20000401";
+  }
+
+  return `${minYear}0401`;
+}
+
+function getDetectionChunkMonths() {
+  return Math.max(
+    1,
+    Number(process.env.HISTORICAL_SYNC_DETECT_CHUNK_MONTHS || 12),
+  );
+}
+
+function buildDetectionDateRanges(input: {
+  fromDate: string;
+  toDate: string;
+}): TallyDateRange[] {
+  const fromDate = parseTallyDate(input.fromDate);
+  const toDate = parseTallyDate(input.toDate);
+
+  if (fromDate > toDate) {
+    throw new Error(
+      `Historical detection fromDate cannot be greater than toDate: ${input.fromDate} > ${input.toDate}`,
+    );
+  }
+
+  const ranges: TallyDateRange[] = [];
+  const chunkMonths = getDetectionChunkMonths();
+
+  let rangeStart = new Date(fromDate);
+
+  while (rangeStart <= toDate) {
+    const rangeEnd = new Date(
+      rangeStart.getFullYear(),
+      rangeStart.getMonth() + chunkMonths,
+      0,
+    );
+
+    ranges.push({
+      fromDate: formatTallyDate(rangeStart),
+      toDate: formatTallyDate(rangeEnd > toDate ? toDate : rangeEnd),
+    });
+
+    rangeStart = new Date(
+      rangeEnd.getFullYear(),
+      rangeEnd.getMonth(),
+      rangeEnd.getDate() + 1,
+    );
+  }
+
+  return ranges;
+}
+
+async function detectTransactionRecordCountForRange(input: {
+  company: TallyCompanyForSync;
+  dateRange: TallyDateRange;
+}) {
+  const { company, dateRange } = input;
+
+  const result = {
+    salesOrders: 0,
+    purchaseOrders: 0,
+    outstandings: 0,
+
+    // SO/PO are date-range reliable transaction proofs.
+    primaryTotal: 0,
+
+    // Outstanding is useful but may not always respect historical range perfectly.
+    fallbackTotal: 0,
+
+    total: 0,
+    errors: [] as string[],
+  };
+
+  try {
+    const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
+    result.salesOrders = parseSalesOrders(String(salesOrdersXml || "")).length;
+  } catch (error: any) {
+    result.errors.push(`sales-orders: ${error?.message || "failed"}`);
+  }
+
+  try {
+    const purchaseOrdersXml = await fetchPurchaseOrdersXml(
+      company.name,
+      dateRange,
+    );
+    result.purchaseOrders = parsePurchaseOrders(
+      String(purchaseOrdersXml || ""),
+    ).length;
+  } catch (error: any) {
+    result.errors.push(`purchase-orders: ${error?.message || "failed"}`);
+  }
+
+  try {
+    const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
+    result.outstandings = parseOutstandings(
+      String(outstandingsXml || ""),
+    ).length;
+  } catch (error: any) {
+    result.errors.push(`outstandings: ${error?.message || "failed"}`);
+  }
+
+  result.primaryTotal = result.salesOrders + result.purchaseOrders;
+  result.fallbackTotal = result.outstandings;
+  result.total = result.primaryTotal + result.fallbackTotal;
+
+  return result;
+}
+
+async function detectCompanyFirstRecordFromDate(input: {
+  company: TallyCompanyForSync;
+  toDate: string;
+}) {
+  if (!isHistoricalAutoDetectEnabled()) {
+    return null;
+  }
+
+  const scanFromDate = getHistoricalAutoDetectFromDate();
+
+  const ranges = buildDetectionDateRanges({
+    fromDate: scanFromDate,
+    toDate: input.toDate,
+  });
+
+  console.log("[HISTORICAL SYNC] Auto-detect start date scanning", {
+    company: input.company.name,
+    scanFromDate,
+    toDate: input.toDate,
+    ranges: ranges.length,
+  });
+
+  let firstOutstandingFallbackFromDate: string | null = null;
+
+  for (const dateRange of ranges) {
+    const count = await detectTransactionRecordCountForRange({
+      company: input.company,
+      dateRange,
+    });
+
+    console.log("[HISTORICAL SYNC] Auto-detect range checked", {
+      company: input.company.name,
+      fromDate: dateRange.fromDate,
+      toDate: dateRange.toDate,
+      salesOrders: count.salesOrders,
+      purchaseOrders: count.purchaseOrders,
+      outstandings: count.outstandings,
+      primaryTotal: count.primaryTotal,
+      fallbackTotal: count.fallbackTotal,
+      total: count.total,
+      errors: count.errors,
+    });
+
+    if (!firstOutstandingFallbackFromDate && count.fallbackTotal > 0) {
+      firstOutstandingFallbackFromDate = dateRange.fromDate;
+    }
+
+    if (count.primaryTotal > 0) {
+      console.log(
+        "[HISTORICAL SYNC] Auto-detect first SO/PO record range found",
+        {
+          company: input.company.name,
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+          salesOrders: count.salesOrders,
+          purchaseOrders: count.purchaseOrders,
+          outstandings: count.outstandings,
+          primaryTotal: count.primaryTotal,
+          total: count.total,
+        },
+      );
+
+      return dateRange.fromDate;
+    }
+  }
+
+  if (firstOutstandingFallbackFromDate) {
+    console.warn(
+      "[HISTORICAL SYNC] Auto-detect using outstanding fallback date",
+      {
+        company: input.company.name,
+        fromDate: firstOutstandingFallbackFromDate,
+        reason:
+          "No Sales Order/Purchase Order found during scan, but Outstanding records were found.",
+      },
+    );
+
+    return firstOutstandingFallbackFromDate;
+  }
+
+  console.warn("[HISTORICAL SYNC] Auto-detect found no historical records", {
+    company: input.company.name,
+    scanFromDate,
+    toDate: input.toDate,
+  });
+
+  return null;
+}
+
+async function resolveCompanyHistoricalFromDate(
   company: TallyCompanyForSync,
   request: NormalizedHistoricalSyncRequest,
 ) {
+  if (request.fromDate) {
+    return request.fromDate;
+  }
+
+  const detectedFromDate = await detectCompanyFirstRecordFromDate({
+    company,
+    toDate: request.toDate,
+  });
+
+  if (detectedFromDate) {
+    return detectedFromDate;
+  }
+
   return (
-    request.fromDate ||
     normalizeTallyDate(company.booksFrom) ||
     normalizeTallyDate(company.startingFrom) ||
     ""
@@ -895,16 +1170,21 @@ async function uploadHistoricalModule(input: {
   }
 }
 
-function buildHistoricalCompanyPlans(input: {
+async function buildHistoricalCompanyPlans(input: {
   companies: TallyCompanyForSync[];
   request: NormalizedHistoricalSyncRequest;
-}): HistoricalCompanyPlan[] {
-  return input.companies.map((company) => {
-    const fromDate = resolveCompanyHistoricalFromDate(company, input.request);
+}): Promise<HistoricalCompanyPlan[]> {
+  const plans: HistoricalCompanyPlan[] = [];
+
+  for (const company of input.companies) {
+    const fromDate = await resolveCompanyHistoricalFromDate(
+      company,
+      input.request,
+    );
 
     if (!fromDate) {
       throw new Error(
-        `Historical fromDate missing for company "${company.name}". Send {"fromDate":"YYYYMMDD"} or make sure Tally company has BooksFrom/StartingFrom.`,
+        `Historical fromDate missing for company "${company.name}". Auto-detect could not find records. Send {"fromDate":"YYYYMMDD"} or set HISTORICAL_SYNC_FROM_DATE.`,
       );
     }
 
@@ -913,13 +1193,15 @@ function buildHistoricalCompanyPlans(input: {
       toDate: input.request.toDate,
     });
 
-    return {
+    plans.push({
       company,
       fromDate,
       toDate: input.request.toDate,
       dateRanges,
-    };
-  });
+    });
+  }
+
+  return plans;
 }
 
 async function syncCompanyMasters(company: TallyCompanyForSync) {
@@ -1316,7 +1598,7 @@ export async function runHistoricalSync(input?: HistoricalSyncRequest) {
       });
     }
 
-    const companyPlans = buildHistoricalCompanyPlans({
+    const companyPlans = await buildHistoricalCompanyPlans({
       companies: selectedCompanies,
       request,
     });
