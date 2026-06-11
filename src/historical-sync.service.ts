@@ -397,6 +397,106 @@ function buildDetectionDateRanges(input: {
   return ranges;
 }
 
+type HistoricalModuleName = "sales-orders" | "purchase-orders" | "outstandings";
+
+type RangeGuardResult<T> = {
+  moduleName: HistoricalModuleName;
+  requestedFromDate: string;
+  requestedToDate: string;
+  parsedRecords: T[];
+  inRangeRecords: T[];
+  outOfRangeRecords: T[];
+  recordsWithoutDate: T[];
+  minReturnedDate: string | null;
+  maxReturnedDate: string | null;
+  firstInRangeDate: string | null;
+};
+
+function getRecordVoucherDate(record: any): string | null {
+  return normalizeTallyDate(
+    record?.voucherDate ||
+      record?.voucher_date ||
+      record?.date ||
+      record?.DATE ||
+      record?.VOUCHERDATE ||
+      record?.billDate ||
+      record?.bill_date,
+  );
+}
+
+function getDateStatsFromRecords(records: any[]) {
+  const dates = records
+    .map((record) => getRecordVoucherDate(record))
+    .filter(Boolean)
+    .sort() as string[];
+
+  return {
+    minReturnedDate: dates[0] || null,
+    maxReturnedDate: dates[dates.length - 1] || null,
+  };
+}
+
+function applyHistoricalRangeGuard<T extends Record<string, any>>(input: {
+  moduleName: HistoricalModuleName;
+  records: T[];
+  dateRange: TallyDateRange;
+  companyName: string;
+}): RangeGuardResult<T> {
+  const parsedRecords = Array.isArray(input.records) ? input.records : [];
+
+  const inRangeRecords: T[] = [];
+  const outOfRangeRecords: T[] = [];
+  const recordsWithoutDate: T[] = [];
+
+  for (const record of parsedRecords) {
+    const recordDate = getRecordVoucherDate(record);
+
+    if (!recordDate) {
+      recordsWithoutDate.push(record);
+      continue;
+    }
+
+    if (
+      recordDate >= input.dateRange.fromDate &&
+      recordDate <= input.dateRange.toDate
+    ) {
+      inRangeRecords.push(record);
+    } else {
+      outOfRangeRecords.push(record);
+    }
+  }
+
+  const { minReturnedDate, maxReturnedDate } =
+    getDateStatsFromRecords(parsedRecords);
+
+  const firstInRangeDate =
+    inRangeRecords
+      .map((record) => getRecordVoucherDate(record))
+      .filter(Boolean)
+      .sort()[0] || null;
+
+  if (parsedRecords.length > 0 && inRangeRecords.length === 0) {
+  } else if (outOfRangeRecords.length > 0 || recordsWithoutDate.length > 0) {
+  }
+
+  return {
+    moduleName: input.moduleName,
+    requestedFromDate: input.dateRange.fromDate,
+    requestedToDate: input.dateRange.toDate,
+    parsedRecords,
+    inRangeRecords,
+    outOfRangeRecords,
+    recordsWithoutDate,
+    minReturnedDate,
+    maxReturnedDate,
+    firstInRangeDate,
+  };
+}
+
+function getEarliestDate(...dates: Array<string | null | undefined>) {
+  return dates.filter(Boolean).sort()[0] || null;
+}
+
 async function detectTransactionRecordCountForRange(input: {
   company: TallyCompanyForSync;
   dateRange: TallyDateRange;
@@ -408,10 +508,30 @@ async function detectTransactionRecordCountForRange(input: {
     purchaseOrders: 0,
     outstandings: 0,
 
+    salesOrdersParsed: 0,
+    purchaseOrdersParsed: 0,
+    outstandingsParsed: 0,
+
+    salesOrdersOutOfRange: 0,
+    purchaseOrdersOutOfRange: 0,
+    outstandingsOutOfRange: 0,
+
+    salesOrdersWithoutDate: 0,
+    purchaseOrdersWithoutDate: 0,
+    outstandingsWithoutDate: 0,
+
+    firstSalesOrderDate: null as string | null,
+    firstPurchaseOrderDate: null as string | null,
+    firstOutstandingDate: null as string | null,
+    firstValidDate: null as string | null,
+
+    minReturnedDate: null as string | null,
+    maxReturnedDate: null as string | null,
+
     // SO/PO are date-range reliable transaction proofs.
     primaryTotal: 0,
 
-    // Outstanding is useful but may not always respect historical range perfectly.
+    // Outstanding is fallback only after strict voucherDate validation.
     fallbackTotal: 0,
 
     total: 0,
@@ -420,7 +540,32 @@ async function detectTransactionRecordCountForRange(input: {
 
   try {
     const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
-    result.salesOrders = parseSalesOrders(String(salesOrdersXml || "")).length;
+    const parsedSalesOrders = parseSalesOrders(String(salesOrdersXml || ""));
+
+    const guardedSalesOrders = applyHistoricalRangeGuard({
+      moduleName: "sales-orders",
+      companyName: company.name,
+      records: parsedSalesOrders,
+      dateRange,
+    });
+
+    result.salesOrders = guardedSalesOrders.inRangeRecords.length;
+    result.salesOrdersParsed = guardedSalesOrders.parsedRecords.length;
+    result.salesOrdersOutOfRange = guardedSalesOrders.outOfRangeRecords.length;
+    result.salesOrdersWithoutDate =
+      guardedSalesOrders.recordsWithoutDate.length;
+    result.firstSalesOrderDate = guardedSalesOrders.firstInRangeDate;
+
+    result.minReturnedDate = getEarliestDate(
+      result.minReturnedDate,
+      guardedSalesOrders.minReturnedDate,
+    );
+
+    result.maxReturnedDate =
+      [result.maxReturnedDate, guardedSalesOrders.maxReturnedDate]
+        .filter(Boolean)
+        .sort()
+        .pop() || null;
   } catch (error: any) {
     result.errors.push(`sales-orders: ${error?.message || "failed"}`);
   }
@@ -430,21 +575,78 @@ async function detectTransactionRecordCountForRange(input: {
       company.name,
       dateRange,
     );
-    result.purchaseOrders = parsePurchaseOrders(
+
+    const parsedPurchaseOrders = parsePurchaseOrders(
       String(purchaseOrdersXml || ""),
-    ).length;
+    );
+
+    const guardedPurchaseOrders = applyHistoricalRangeGuard({
+      moduleName: "purchase-orders",
+      companyName: company.name,
+      records: parsedPurchaseOrders,
+      dateRange,
+    });
+
+    result.purchaseOrders = guardedPurchaseOrders.inRangeRecords.length;
+    result.purchaseOrdersParsed = guardedPurchaseOrders.parsedRecords.length;
+    result.purchaseOrdersOutOfRange =
+      guardedPurchaseOrders.outOfRangeRecords.length;
+    result.purchaseOrdersWithoutDate =
+      guardedPurchaseOrders.recordsWithoutDate.length;
+    result.firstPurchaseOrderDate = guardedPurchaseOrders.firstInRangeDate;
+
+    result.minReturnedDate = getEarliestDate(
+      result.minReturnedDate,
+      guardedPurchaseOrders.minReturnedDate,
+    );
+
+    result.maxReturnedDate =
+      [result.maxReturnedDate, guardedPurchaseOrders.maxReturnedDate]
+        .filter(Boolean)
+        .sort()
+        .pop() || null;
   } catch (error: any) {
     result.errors.push(`purchase-orders: ${error?.message || "failed"}`);
   }
 
   try {
     const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
-    result.outstandings = parseOutstandings(
-      String(outstandingsXml || ""),
-    ).length;
+    const parsedOutstandings = parseOutstandings(String(outstandingsXml || ""));
+
+    const guardedOutstandings = applyHistoricalRangeGuard({
+      moduleName: "outstandings",
+      companyName: company.name,
+      records: parsedOutstandings,
+      dateRange,
+    });
+
+    result.outstandings = guardedOutstandings.inRangeRecords.length;
+    result.outstandingsParsed = guardedOutstandings.parsedRecords.length;
+    result.outstandingsOutOfRange =
+      guardedOutstandings.outOfRangeRecords.length;
+    result.outstandingsWithoutDate =
+      guardedOutstandings.recordsWithoutDate.length;
+    result.firstOutstandingDate = guardedOutstandings.firstInRangeDate;
+
+    result.minReturnedDate = getEarliestDate(
+      result.minReturnedDate,
+      guardedOutstandings.minReturnedDate,
+    );
+
+    result.maxReturnedDate =
+      [result.maxReturnedDate, guardedOutstandings.maxReturnedDate]
+        .filter(Boolean)
+        .sort()
+        .pop() || null;
   } catch (error: any) {
     result.errors.push(`outstandings: ${error?.message || "failed"}`);
   }
+
+  result.firstValidDate = getEarliestDate(
+    result.firstSalesOrderDate,
+    result.firstPurchaseOrderDate,
+    result.firstOutstandingDate,
+  );
 
   result.primaryTotal = result.salesOrders + result.purchaseOrders;
   result.fallbackTotal = result.outstandings;
@@ -468,14 +670,7 @@ async function detectCompanyFirstRecordFromDate(input: {
     toDate: input.toDate,
   });
 
-  console.log("[HISTORICAL SYNC] Auto-detect start date scanning", {
-    company: input.company.name,
-    scanFromDate,
-    toDate: input.toDate,
-    ranges: ranges.length,
-  });
-
-  let firstOutstandingFallbackFromDate: string | null = null;
+  let firstOutstandingFallbackDate: string | null = null;
 
   for (const dateRange of ranges) {
     const count = await detectTransactionRecordCountForRange({
@@ -483,61 +678,38 @@ async function detectCompanyFirstRecordFromDate(input: {
       dateRange,
     });
 
-    console.log("[HISTORICAL SYNC] Auto-detect range checked", {
-      company: input.company.name,
-      fromDate: dateRange.fromDate,
-      toDate: dateRange.toDate,
-      salesOrders: count.salesOrders,
-      purchaseOrders: count.purchaseOrders,
-      outstandings: count.outstandings,
-      primaryTotal: count.primaryTotal,
-      fallbackTotal: count.fallbackTotal,
-      total: count.total,
-      errors: count.errors,
-    });
-
-    if (!firstOutstandingFallbackFromDate && count.fallbackTotal > 0) {
-      firstOutstandingFallbackFromDate = dateRange.fromDate;
+    if (!firstOutstandingFallbackDate && count.firstOutstandingDate) {
+      firstOutstandingFallbackDate = count.firstOutstandingDate;
     }
 
-    if (count.primaryTotal > 0) {
-      console.log(
-        "[HISTORICAL SYNC] Auto-detect first SO/PO record range found",
-        {
-          company: input.company.name,
-          fromDate: dateRange.fromDate,
-          toDate: dateRange.toDate,
-          salesOrders: count.salesOrders,
-          purchaseOrders: count.purchaseOrders,
-          outstandings: count.outstandings,
-          primaryTotal: count.primaryTotal,
-          total: count.total,
-        },
-      );
-
-      return dateRange.fromDate;
+    if (count.primaryTotal > 0 && count.firstValidDate) {
+      return count.firstValidDate;
     }
   }
 
-  if (firstOutstandingFallbackFromDate) {
+  if (firstOutstandingFallbackDate) {
     console.warn(
-      "[HISTORICAL SYNC] Auto-detect using outstanding fallback date",
+      "[HISTORICAL SYNC] Auto-detect using outstanding fallback actual voucher date",
       {
         company: input.company.name,
-        fromDate: firstOutstandingFallbackFromDate,
+        actualFirstOutstandingDate: firstOutstandingFallbackDate,
         reason:
-          "No Sales Order/Purchase Order found during scan, but Outstanding records were found.",
+          "No Sales Order/Purchase Order found during scan, but in-range Outstanding records were found.",
       },
     );
 
-    return firstOutstandingFallbackFromDate;
+    return firstOutstandingFallbackDate;
   }
 
-  console.warn("[HISTORICAL SYNC] Auto-detect found no historical records", {
-    company: input.company.name,
-    scanFromDate,
-    toDate: input.toDate,
-  });
+  console.warn(
+    "[HISTORICAL SYNC] Auto-detect found no valid historical records",
+    {
+      company: input.company.name,
+      scanFromDate,
+      toDate: input.toDate,
+      note: "If Tally returned records outside requested ranges, they were ignored by range guard.",
+    },
+  );
 
   return null;
 }
@@ -546,24 +718,61 @@ async function resolveCompanyHistoricalFromDate(
   company: TallyCompanyForSync,
   request: NormalizedHistoricalSyncRequest,
 ) {
-  if (request.fromDate) {
-    return request.fromDate;
-  }
-
   const detectedFromDate = await detectCompanyFirstRecordFromDate({
     company,
     toDate: request.toDate,
   });
 
   if (detectedFromDate) {
+    const requestFromDate = normalizeTallyDate(request.fromDate);
+
+    if (requestFromDate && detectedFromDate < requestFromDate) {
+      console.log(
+        "[HISTORICAL SYNC] Actual first record is before requested/env fromDate",
+        {
+          company: company.name,
+          requestedFromDate: requestFromDate,
+          actualFirstRecordDate: detectedFromDate,
+          action:
+            "starting from actual first record because robust historical mode does not trust env/curl as final start",
+        },
+      );
+    }
+
+    if (requestFromDate && detectedFromDate > requestFromDate) {
+      console.log(
+        "[HISTORICAL SYNC] No valid records found at requested/env fromDate; starting from actual first record",
+        {
+          company: company.name,
+          requestedFromDate: requestFromDate,
+          actualFirstRecordDate: detectedFromDate,
+        },
+      );
+    }
+
     return detectedFromDate;
   }
 
-  return (
+  const companyBooksFrom =
     normalizeTallyDate(company.booksFrom) ||
     normalizeTallyDate(company.startingFrom) ||
-    ""
-  );
+    "";
+
+  if (companyBooksFrom) {
+    console.warn(
+      "[HISTORICAL SYNC] Auto-detect found no records; using company booksFrom as last fallback",
+      {
+        company: company.name,
+        booksFrom: companyBooksFrom,
+        requestFromDate: request.fromDate || null,
+        toDate: request.toDate,
+      },
+    );
+
+    return companyBooksFrom;
+  }
+
+  return "";
 }
 
 function enrichOutstandingsWithLedgerGuid(outstandings: any[], ledgers: any[]) {

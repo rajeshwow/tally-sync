@@ -182,15 +182,15 @@ function validateCrmBatchResult(input: {
 
   const counts = extractCrmSyncCounts(input.response);
 
-  console.log(
-    `[CRM CLIENT] ${input.moduleName} batch ${input.batchLabel} CRM result`,
-    {
-      total: counts.total,
-      success: counts.success,
-      failed: counts.failed,
-      jobId: counts.jobId,
-    },
-  );
+  // console.log(
+  //   `[CRM CLIENT] ${input.moduleName} batch ${input.batchLabel} CRM result`,
+  //   {
+  //     total: counts.total,
+  //     success: counts.success,
+  //     failed: counts.failed,
+  //     jobId: counts.jobId,
+  //   },
+  // );
 
   if (input.batchRecords > 0 && counts.failed > 0) {
     throw new Error(
@@ -291,9 +291,9 @@ async function pushRecordsToCrm(
 
   const company = options.companyName ? ` [${options.companyName}]` : "";
 
-  console.log(
-    `[SYNC]${company} ${moduleName.padEnd(18)} → ${safeRecords.length} records, ${batches.length} batches`,
-  );
+  // console.log(
+  //   `[SYNC]${company} ${moduleName.padEnd(18)} → ${safeRecords.length} records, ${batches.length} batches`,
+  // );
 
   if (!safeRecords.length) {
     emitProgress({ type: "module_complete" });
@@ -306,9 +306,9 @@ async function pushRecordsToCrm(
 
     const batchLabel = `${batchNo}/${batches.length}`;
 
-    console.log(
-      `[SYNC]${company} ${moduleName.padEnd(18)} ⏳ Batch ${batchLabel} — ${batch.length} records`,
-    );
+    // console.log(
+    //   `[SYNC]${company} ${moduleName.padEnd(18)} ⏳ Batch ${batchLabel} — ${batch.length} records`,
+    // );
 
     emitProgress({
       type: "batch_start",
@@ -352,9 +352,9 @@ async function pushRecordsToCrm(
       );
       summary.results.push(result);
 
-      console.log(
-        `[SYNC]${company} ${moduleName.padEnd(18)} ✅ Batch ${batchLabel} done — ${summary.uploadedRecords}/${safeRecords.length} records uploaded`,
-      );
+      // console.log(
+      //   `[SYNC]${company} ${moduleName.padEnd(18)} ✅ Batch ${batchLabel} done — ${summary.uploadedRecords}/${safeRecords.length} records uploaded`,
+      // );
 
       emitProgress({
         type: "batch_success",
@@ -385,9 +385,9 @@ async function pushRecordsToCrm(
 
   emitProgress({ type: "module_complete" });
 
-  console.log(
-    `[SYNC]${company} ${moduleName.padEnd(18)} ✔ Complete — ${summary.uploadedRecords}/${safeRecords.length} records, ${summary.successBatches}/${batches.length} batches`,
-  );
+  // console.log(
+  //   `[SYNC]${company} ${moduleName.padEnd(18)} ✔ Complete — ${summary.uploadedRecords}/${safeRecords.length} records, ${summary.successBatches}/${batches.length} batches`,
+  // );
 
   return summary;
 }

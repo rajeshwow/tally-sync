@@ -55,9 +55,16 @@ function buildDateRangeVariables(dateRange?: TallyDateRange) {
     return "";
   }
 
+  const fromDate = escapeXml(dateRange.fromDate);
+  const toDate = escapeXml(dateRange.toDate);
+
   return `
-        <SVFROMDATE>${escapeXml(dateRange.fromDate)}</SVFROMDATE>
-        <SVTODATE>${escapeXml(dateRange.toDate)}</SVTODATE>
+        <SVFromDate>${fromDate}</SVFromDate>
+        <SVToDate>${toDate}</SVToDate>
+        <SVCurrentDate>${toDate}</SVCurrentDate>
+        <SVFROMDATE>${fromDate}</SVFROMDATE>
+        <SVTODATE>${toDate}</SVTODATE>
+        <SVCURRENTDATE>${toDate}</SVCURRENTDATE>
 `;
 }
 
@@ -72,7 +79,9 @@ function buildDateRangeFilterFormula(dateRange?: TallyDateRange) {
 
   return `
           <SYSTEM TYPE="Formulae" NAME="DateInSelectedRange">
-            $Date &gt;= ##SVFromDate AND $Date &lt;= ##SVToDate
+            NOT $$IsEmpty:$Date
+            AND $Date &gt;= ##SVFROMDATE
+            AND $Date &lt;= ##SVTODATE
           </SYSTEM>
 `;
 }
@@ -236,8 +245,8 @@ export async function fetchSalesOrdersXml(
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlySalesVouchers">
-            $$IsSales:$VoucherTypeName OR $$IsOrder:$VoucherTypeName
-          </SYSTEM>
+  $$IsSales:$VoucherTypeName AND NOT $$IsOrder:$VoucherTypeName
+</SYSTEM>
           ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
