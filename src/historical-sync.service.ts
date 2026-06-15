@@ -730,61 +730,57 @@ async function resolveCompanyHistoricalFromDate(
   company: TallyCompanyForSync,
   request: NormalizedHistoricalSyncRequest,
 ) {
+  const requestFromDate = normalizeTallyDate(request.fromDate);
+
+  // 1. Highest priority: curl/env se jo fromDate aaye, wahi use karo
+  if (requestFromDate) {
+    console.log("[HISTORICAL SYNC] Using explicit fromDate", {
+      company: company.name,
+      fromDate: requestFromDate,
+    });
+
+    return requestFromDate;
+  }
+
+  // 2. Agar explicit fromDate nahi hai, tab auto-detect try karo
   const detectedFromDate = await detectCompanyFirstRecordFromDate({
     company,
     toDate: request.toDate,
   });
 
   if (detectedFromDate) {
-    const requestFromDate = normalizeTallyDate(request.fromDate);
-
-    if (requestFromDate && detectedFromDate < requestFromDate) {
-      console.log(
-        "[HISTORICAL SYNC] Actual first record is before requested/env fromDate",
-        {
-          company: company.name,
-          requestedFromDate: requestFromDate,
-          actualFirstRecordDate: detectedFromDate,
-          action:
-            "starting from actual first record because robust historical mode does not trust env/curl as final start",
-        },
-      );
-    }
-
-    if (requestFromDate && detectedFromDate > requestFromDate) {
-      console.log(
-        "[HISTORICAL SYNC] No valid records found at requested/env fromDate; starting from actual first record",
-        {
-          company: company.name,
-          requestedFromDate: requestFromDate,
-          actualFirstRecordDate: detectedFromDate,
-        },
-      );
-    }
+    console.log("[HISTORICAL SYNC] Using auto-detected fromDate", {
+      company: company.name,
+      fromDate: detectedFromDate,
+    });
 
     return detectedFromDate;
   }
 
+  // 3. Tally company booksFrom fallback
   const companyBooksFrom =
     normalizeTallyDate(company.booksFrom) ||
     normalizeTallyDate(company.startingFrom) ||
     "";
 
   if (companyBooksFrom) {
-    console.warn(
-      "[HISTORICAL SYNC] Auto-detect found no records; using company booksFrom as last fallback",
-      {
-        company: company.name,
-        booksFrom: companyBooksFrom,
-        requestFromDate: request.fromDate || null,
-        toDate: request.toDate,
-      },
-    );
+    console.warn("[HISTORICAL SYNC] Using company booksFrom fallback", {
+      company: company.name,
+      booksFrom: companyBooksFrom,
+    });
 
     return companyBooksFrom;
   }
 
-  return "";
+  // 4. Final fallback: env min year se start karo, crash mat karo
+  const fallbackFromDate = getHistoricalAutoDetectFromDate();
+
+  console.warn("[HISTORICAL SYNC] Using fallback fromDate from min year", {
+    company: company.name,
+    fallbackFromDate,
+  });
+
+  return fallbackFromDate;
 }
 
 function enrichOutstandingsWithLedgerGuid(outstandings: any[], ledgers: any[]) {
