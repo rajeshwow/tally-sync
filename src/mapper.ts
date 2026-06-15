@@ -1377,7 +1377,41 @@ function parseVoucherCostCenters(voucherBlock: string) {
   };
 }
 
-function parseVoucherOrders(xml: string, expectedVoucherType: string) {
+type VoucherOrderParseOptions = {
+  exactVoucherType?: boolean;
+  excludeOrderVoucherTypes?: boolean;
+};
+
+function isVoucherTypeAllowed(
+  voucherType: string | null | undefined,
+  expectedVoucherType: string,
+  options: VoucherOrderParseOptions = {},
+) {
+  const normalizedVoucherType = normalizeText(voucherType);
+  const normalizedExpectedType = normalizeText(expectedVoucherType);
+
+  if (!normalizedExpectedType) return true;
+  if (!normalizedVoucherType) return false;
+
+  if (
+    options.excludeOrderVoucherTypes &&
+    normalizedVoucherType.includes("order")
+  ) {
+    return false;
+  }
+
+  if (options.exactVoucherType) {
+    return normalizedVoucherType === normalizedExpectedType;
+  }
+
+  return normalizedVoucherType.includes(normalizedExpectedType);
+}
+
+function parseVoucherOrders(
+  xml: string,
+  expectedVoucherType: string,
+  options: VoucherOrderParseOptions = {},
+) {
   const source = String(xml || "");
 
   const voucherBlocks = source.match(/<VOUCHER\b[\s\S]*?<\/VOUCHER>/gi) || [];
@@ -1388,20 +1422,7 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
         stripXml(readTag(block, "VOUCHERTYPENAME")) ||
         readAttr(block, "VOUCHER", "VCHTYPE");
 
-      const normalizedVoucherType = normalizeText(voucherType);
-      const normalizedExpectedType = normalizeText(expectedVoucherType);
-
-      /**
-       * Works for:
-       * Sales
-       * Sales Order
-       * Purchase
-       * Purchase Order
-       */
-      if (
-        normalizedExpectedType &&
-        !normalizedVoucherType.includes(normalizedExpectedType)
-      ) {
+      if (!isVoucherTypeAllowed(voucherType, expectedVoucherType, options)) {
         return null;
       }
 
@@ -1465,9 +1486,6 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
       const narration = stripXml(readTag(block, "NARRATION"));
 
       return {
-        /**
-         * Old/current aliases
-         */
         guid,
         voucherKey,
         masterId,
@@ -1492,9 +1510,6 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
         costCenterAmount: costCenterData.costCenterAmount,
         costCenterAllocations: costCenterData.costCenterAllocations,
 
-        /**
-         * Backend/CRM safe aliases
-         */
         tallyGuid: guid,
         tally_guid: guid,
 
@@ -1504,12 +1519,10 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
         voucher_key: voucherKey,
 
         master_id: masterId,
-
         alter_id: alterId,
 
         voucherNo: voucherNumber,
         voucher_no: voucherNumber,
-
         voucher_number: voucherNumber,
 
         voucherTypeName: voucherType,
@@ -1517,7 +1530,6 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
 
         partyLedgerName,
         party_ledger_name: partyLedgerName,
-
         party_name: partyLedgerName,
 
         partyLedgerGuid: partyGuid,
@@ -1547,7 +1559,10 @@ function parseVoucherOrders(xml: string, expectedVoucherType: string) {
 }
 
 export function parseSalesOrders(xml: string) {
-  return parseVoucherOrders(xml, "Sales");
+  return parseVoucherOrders(xml, "Sales", {
+    exactVoucherType: true,
+    excludeOrderVoucherTypes: true,
+  });
 }
 
 export function parsePurchaseOrders(xml: string) {

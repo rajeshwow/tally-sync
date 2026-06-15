@@ -80,8 +80,8 @@ function buildDateRangeFilterFormula(dateRange?: TallyDateRange) {
   return `
           <SYSTEM TYPE="Formulae" NAME="DateInSelectedRange">
             NOT $$IsEmpty:$Date
-            AND $Date &gt;= ##SVFROMDATE
-            AND $Date &lt;= ##SVTODATE
+            AND $Date &gt;= ##SVFromDate
+            AND $Date &lt;= ##SVToDate
           </SYSTEM>
 `;
 }
@@ -244,8 +244,8 @@ export async function fetchSalesOrdersXml(
             <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
-          <SYSTEM TYPE="Formulae" NAME="OnlySalesVouchers">
-  $$IsSales:$VoucherTypeName AND NOT $$IsOrder:$VoucherTypeName
+         <SYSTEM TYPE="Formulae" NAME="OnlySalesVouchers">
+  $VoucherTypeName = "Sales"
 </SYSTEM>
           ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>

@@ -493,6 +493,18 @@ function applyHistoricalRangeGuard<T extends Record<string, any>>(input: {
   };
 }
 
+function logHistoricalRangeGuardSummary<T>(guard: RangeGuardResult<T>) {
+  console.log("[HISTORICAL][RANGE FILTER]", {
+    module: guard.moduleName,
+    fromDate: guard.requestedFromDate,
+    toDate: guard.requestedToDate,
+    raw: guard.parsedRecords.length,
+    inRange: guard.inRangeRecords.length,
+    outOfRange: guard.outOfRangeRecords.length,
+    withoutDate: guard.recordsWithoutDate.length,
+  });
+}
+
 function getEarliestDate(...dates: Array<string | null | undefined>) {
   return dates.filter(Boolean).sort()[0] || null;
 }
@@ -1557,6 +1569,14 @@ async function syncCompanyTransactionsByRange(input: {
   });
 
   try {
+    /**
+     * SALES VOUCHERS
+     *
+     * Important:
+     * Tally XML date filter is not reliable in every company/report context.
+     * So after parsing, we MUST locally filter by voucherDate.
+     * Only in-range records should be uploaded to CRM.
+     */
     upsertModuleProgress({
       moduleName: "sales-orders",
       companyName: company.name,
@@ -1567,8 +1587,19 @@ async function syncCompanyTransactionsByRange(input: {
     });
 
     const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
+    const parsedSalesOrders = parseSalesOrders(String(salesOrdersXml || ""));
+
+    const guardedSalesOrders = applyHistoricalRangeGuard({
+      moduleName: "sales-orders",
+      companyName: company.name,
+      records: parsedSalesOrders,
+      dateRange,
+    });
+
+    logHistoricalRangeGuardSummary(guardedSalesOrders);
+
     const salesOrders = attachCompany(
-      parseSalesOrders(String(salesOrdersXml || "")),
+      guardedSalesOrders.inRangeRecords,
       company,
     );
 
@@ -1593,6 +1624,9 @@ async function syncCompanyTransactionsByRange(input: {
       push: pushSalesOrdersToCrm,
     });
 
+    /**
+     * PURCHASE VOUCHERS
+     */
     upsertModuleProgress({
       moduleName: "purchase-orders",
       companyName: company.name,
@@ -1607,8 +1641,21 @@ async function syncCompanyTransactionsByRange(input: {
       dateRange,
     );
 
+    const parsedPurchaseOrders = parsePurchaseOrders(
+      String(purchaseOrdersXml || ""),
+    );
+
+    const guardedPurchaseOrders = applyHistoricalRangeGuard({
+      moduleName: "purchase-orders",
+      companyName: company.name,
+      records: parsedPurchaseOrders,
+      dateRange,
+    });
+
+    logHistoricalRangeGuardSummary(guardedPurchaseOrders);
+
     const purchaseOrders = attachCompany(
-      parsePurchaseOrders(String(purchaseOrdersXml || "")),
+      guardedPurchaseOrders.inRangeRecords,
       company,
     );
 
@@ -1633,6 +1680,9 @@ async function syncCompanyTransactionsByRange(input: {
       push: pushPurchaseOrdersToCrm,
     });
 
+    /**
+     * OUTSTANDINGS
+     */
     upsertModuleProgress({
       moduleName: "outstandings",
       companyName: company.name,
@@ -1645,8 +1695,20 @@ async function syncCompanyTransactionsByRange(input: {
     const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
     const parsedOutstandings = parseOutstandings(String(outstandingsXml || ""));
 
+    const guardedOutstandings = applyHistoricalRangeGuard({
+      moduleName: "outstandings",
+      companyName: company.name,
+      records: parsedOutstandings,
+      dateRange,
+    });
+
+    logHistoricalRangeGuardSummary(guardedOutstandings);
+
     const outstandings = attachCompany(
-      enrichOutstandingsWithLedgerGuid(parsedOutstandings, ledgers),
+      enrichOutstandingsWithLedgerGuid(
+        guardedOutstandings.inRangeRecords,
+        ledgers,
+      ),
       company,
     );
 
@@ -1689,23 +1751,45 @@ async function syncCompanyTransactionsByRange(input: {
       company: company.name,
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
+
+      salesOrdersRaw: guardedSalesOrders.parsedRecords.length,
       salesOrders: salesOrders.length,
+      salesOrdersOutOfRange: guardedSalesOrders.outOfRangeRecords.length,
+      salesOrdersWithoutDate: guardedSalesOrders.recordsWithoutDate.length,
+
+      purchaseOrdersRaw: guardedPurchaseOrders.parsedRecords.length,
       purchaseOrders: purchaseOrders.length,
+      purchaseOrdersOutOfRange: guardedPurchaseOrders.outOfRangeRecords.length,
+      purchaseOrdersWithoutDate:
+        guardedPurchaseOrders.recordsWithoutDate.length,
+
+      outstandingsRaw: guardedOutstandings.parsedRecords.length,
       outstandings: outstandings.length,
+      outstandingsOutOfRange: guardedOutstandings.outOfRangeRecords.length,
+      outstandingsWithoutDate: guardedOutstandings.recordsWithoutDate.length,
     });
 
     return {
       dateRange,
       salesOrders: {
+        rawCount: guardedSalesOrders.parsedRecords.length,
         count: salesOrders.length,
+        outOfRange: guardedSalesOrders.outOfRangeRecords.length,
+        withoutDate: guardedSalesOrders.recordsWithoutDate.length,
         result: salesOrderResult,
       },
       purchaseOrders: {
+        rawCount: guardedPurchaseOrders.parsedRecords.length,
         count: purchaseOrders.length,
+        outOfRange: guardedPurchaseOrders.outOfRangeRecords.length,
+        withoutDate: guardedPurchaseOrders.recordsWithoutDate.length,
         result: purchaseOrderResult,
       },
       outstandings: {
+        rawCount: guardedOutstandings.parsedRecords.length,
         count: outstandings.length,
+        outOfRange: guardedOutstandings.outOfRangeRecords.length,
+        withoutDate: guardedOutstandings.recordsWithoutDate.length,
         result: outstandingResult,
       },
     };
