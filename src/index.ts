@@ -7,6 +7,10 @@ import {
   getHistoricalSyncStatus,
   startHistoricalSyncInBackground,
 } from "./historical-sync.service";
+import {
+  getHistoricalTransactionsSyncStatus,
+  startHistoricalTransactionsSyncInBackground,
+} from "./historical-transactions.service";
 import { parseTallyLoadedCompany } from "./mapper";
 import { runFullSync } from "./sync.service";
 import { fetchTallyCompaniesXml } from "./tally.client";
@@ -74,6 +78,12 @@ function isHistoricalSyncActive() {
   return Boolean(status?.isRunning || status?.progress?.isRunning);
 }
 
+function isHistoricalTransactionsSyncActive() {
+  const status = getHistoricalTransactionsSyncStatus();
+
+  return Boolean(status?.isRunning);
+}
+
 /**
  * CRM backend will call this API for connection check.
  */
@@ -108,6 +118,18 @@ app.post(
         data: {
           agent: getAgentStatus(),
           historical: getHistoricalSyncStatus(),
+        },
+      });
+    }
+
+    if (isHistoricalTransactionsSyncActive()) {
+      return res.status(409).json({
+        statusCode: 409,
+        message:
+          "Historical transaction sync is already running. Manual sync skipped.",
+        data: {
+          agent: getAgentStatus(),
+          historicalTransactions: getHistoricalTransactionsSyncStatus(),
         },
       });
     }
@@ -194,6 +216,18 @@ app.post(
         });
       }
 
+      if (isHistoricalTransactionsSyncActive()) {
+        return res.status(409).json({
+          statusCode: 409,
+          message:
+            "Historical transaction sync is already running. Sync now skipped.",
+          data: {
+            agent: getAgentStatus(),
+            historicalTransactions: getHistoricalTransactionsSyncStatus(),
+          },
+        });
+      }
+
       isManualSyncRunning = true;
       lastManualSyncStatus = "running";
       lastManualSyncStartedAt = new Date().toISOString();
@@ -273,6 +307,89 @@ app.post("/sync/historical", requireControlToken, (req, res) => {
   });
 });
 
+app.get(
+  "/sync/historical-transactions/status",
+  requireControlToken,
+  (_req, res) => {
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Historical transaction sync status fetched",
+      data: getHistoricalTransactionsSyncStatus(),
+    });
+  },
+);
+
+app.post("/sync/historical-transactions", requireControlToken, (req, res) => {
+  if (isManualSyncRunning) {
+    return res.status(409).json({
+      statusCode: 409,
+      message:
+        "Manual sync is already running. Historical transaction sync skipped.",
+      data: {
+        agent: getAgentStatus(),
+        historicalTransactions: getHistoricalTransactionsSyncStatus(),
+      },
+    });
+  }
+
+  if (isHistoricalSyncActive()) {
+    return res.status(409).json({
+      statusCode: 409,
+      message:
+        "Historical master sync is already running. Historical transaction sync skipped.",
+      data: {
+        agent: getAgentStatus(),
+        historical: getHistoricalSyncStatus(),
+        historicalTransactions: getHistoricalTransactionsSyncStatus(),
+      },
+    });
+  }
+
+  const result = startHistoricalTransactionsSyncInBackground({
+    fromDate: req.body?.fromDate || undefined,
+    toDate: req.body?.toDate || undefined,
+    companyName: req.body?.companyName || undefined,
+    modules: Array.isArray(req.body?.modules) ? req.body.modules : undefined,
+  });
+
+  return res.status(result.started ? 202 : 409).json({
+    statusCode: result.started ? 202 : 409,
+    message: result.message,
+    data: result.data,
+  });
+});
+
+/**
+ * Alias for readability from CRM/backend/Postman.
+ */
+app.post("/sync/transactions/historical", requireControlToken, (req, res) => {
+  if (isManualSyncRunning || isHistoricalSyncActive()) {
+    return res.status(409).json({
+      statusCode: 409,
+      message:
+        "Another sync is already running. Historical transaction sync skipped.",
+      data: {
+        agent: getAgentStatus(),
+        historical: getHistoricalSyncStatus(),
+        historicalTransactions: getHistoricalTransactionsSyncStatus(),
+      },
+    });
+  }
+
+  const result = startHistoricalTransactionsSyncInBackground({
+    fromDate: req.body?.fromDate || undefined,
+    toDate: req.body?.toDate || undefined,
+    companyName: req.body?.companyName || undefined,
+    modules: Array.isArray(req.body?.modules) ? req.body.modules : undefined,
+  });
+
+  return res.status(result.started ? 202 : 409).json({
+    statusCode: result.started ? 202 : 409,
+    message: result.message,
+    data: result.data,
+  });
+});
+
 if (process.env.DISABLE_AUTO_SYNC !== "true") {
   cron.schedule(SYNC_CRON, async () => {
     try {
@@ -283,6 +400,13 @@ if (process.env.DISABLE_AUTO_SYNC !== "true") {
 
       if (isHistoricalSyncActive()) {
         console.log("[CRON SYNC] Skipped because historical sync is running");
+        return;
+      }
+
+      if (isHistoricalTransactionsSyncActive()) {
+        console.log(
+          "[CRON SYNC] Skipped because historical transaction sync is running",
+        );
         return;
       }
 

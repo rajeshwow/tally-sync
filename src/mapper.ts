@@ -1568,3 +1568,23 @@ export function parseSalesOrders(xml: string) {
 export function parsePurchaseOrders(xml: string) {
   return parseVoucherOrders(xml, "Purchase");
 }
+
+/**
+ * Historical deep transaction sync:
+ * Use inclusive voucher type matching for custom Tally voucher types like
+ * "GST Sales", "Local Purchase", etc. but always exclude Order vouchers.
+ * Existing parseSalesOrders/parsePurchaseOrders are kept unchanged.
+ */
+export function parseSalesVouchers(xml: string) {
+  return parseVoucherOrders(xml, "Sales", {
+    exactVoucherType: false,
+    excludeOrderVoucherTypes: true,
+  });
+}
+
+export function parsePurchaseVouchers(xml: string) {
+  return parseVoucherOrders(xml, "Purchase", {
+    exactVoucherType: false,
+    excludeOrderVoucherTypes: true,
+  });
+}
