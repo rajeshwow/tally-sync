@@ -1658,23 +1658,8 @@ async function syncCompanyTransactions(input: {
     rangeMonths,
   });
 
-  const salesCollection = modules.includes("sales-vouchers")
-    ? await collectSalesVouchersForCompany({
-        company,
-        fromDate,
-        toDate,
-        ranges,
-      })
-    : null;
-
-  const purchaseCollection = modules.includes("purchase-vouchers")
-    ? await collectPurchaseVouchersForCompany({
-        company,
-        fromDate,
-        toDate,
-        ranges,
-      })
-    : null;
+  const shouldSyncSales = modules.includes("sales-vouchers");
+  const shouldSyncPurchase = modules.includes("purchase-vouchers");
 
   for (const dateRange of ranges) {
     addEvent("info", "Transaction range started", {
@@ -1689,17 +1674,10 @@ async function syncCompanyTransactions(input: {
     let salesResult: any = null;
     let purchaseResult: any = null;
 
-    if (salesCollection) {
-      const bucket = salesCollection.buckets.find(
-        (item: any) =>
-          item.fromDate === dateRange.fromDate &&
-          item.toDate === dateRange.toDate,
-      );
-
-      salesResult = await pushSalesVoucherBucket({
+    if (shouldSyncSales) {
+      salesResult = await pushSalesVoucherRange({
         company,
         dateRange,
-        records: bucket?.records || [],
       });
 
       companyResult.salesVouchers.push(salesResult);
@@ -1707,17 +1685,10 @@ async function syncCompanyTransactions(input: {
       historicalTransactionsStatus.summary.rangesCompleted += 1;
     }
 
-    if (purchaseCollection) {
-      const bucket = purchaseCollection.buckets.find(
-        (item: any) =>
-          item.fromDate === dateRange.fromDate &&
-          item.toDate === dateRange.toDate,
-      );
-
-      purchaseResult = await pushPurchaseVoucherBucket({
+    if (shouldSyncPurchase) {
+      purchaseResult = await pushPurchaseVoucherRange({
         company,
         dateRange,
-        records: bucket?.records || [],
       });
 
       companyResult.purchaseVouchers.push(purchaseResult);

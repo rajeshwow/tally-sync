@@ -413,11 +413,13 @@ export async function fetchHistoricalSalesVouchersXml(
               CostCentreAllocations
             </FETCH>
             <FILTER>OnlyDeepSalesVouchers</FILTER>
+            <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlyDeepSalesVouchers">
             $$IsSales:$VoucherTypeName AND NOT $$IsOrder:$VoucherTypeName
           </SYSTEM>
+          ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
     </DESC>
@@ -471,12 +473,14 @@ export async function fetchHistoricalPurchaseVouchersXml(
               CategoryAllocations,
               CostCentreAllocations
             </FETCH>
-            <FILTER>OnlyDeepPurchaseVouchers</FILTER>
+             <FILTER>OnlyDeepPurchaseVouchers</FILTER>
+            <FILTER>DateInSelectedRange</FILTER>
           </COLLECTION>
 
           <SYSTEM TYPE="Formulae" NAME="OnlyDeepPurchaseVouchers">
             $$IsPurchase:$VoucherTypeName AND NOT $$IsOrder:$VoucherTypeName
           </SYSTEM>
+          ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
     </DESC>
