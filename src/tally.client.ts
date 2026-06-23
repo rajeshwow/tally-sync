@@ -22,11 +22,84 @@ export async function postToTally(xml: string) {
     timeout: TALLY_REQUEST_TIMEOUT_MS,
     maxBodyLength: Infinity,
     maxContentLength: Infinity,
-    responseType: "text",
+    responseType: "arraybuffer",
     transformResponse: [(data) => data],
   });
 
-  return sanitizeTallyXmlResponse(response.data);
+  return sanitizeTallyXmlResponse(decodeTallyHttpResponse(response.data));
+}
+
+function decodeUtf16Be(buffer: Buffer) {
+  const evenLength = buffer.length - (buffer.length % 2);
+  const swapped = Buffer.allocUnsafe(evenLength);
+
+  for (let i = 0; i < evenLength; i += 2) {
+    swapped[i] = buffer[i + 1];
+    swapped[i + 1] = buffer[i];
+  }
+
+  return swapped.toString("utf16le");
+}
+
+function decodeTallyHttpResponse(data: any) {
+  if (typeof data === "string") {
+    return data;
+  }
+
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
+
+  if (!buffer.length) return "";
+
+  // UTF-16 LE BOM: FF FE
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.toString("utf16le");
+  }
+
+  // UTF-16 BE BOM: FE FF
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    return decodeUtf16Be(buffer.subarray(2));
+  }
+
+  /**
+   * Some Tally/RDP responses come without charset header.
+   * Detect UTF-16 by null byte pattern.
+   */
+  const sample = buffer.subarray(0, Math.min(buffer.length, 2000));
+  let evenNulls = 0;
+  let oddNulls = 0;
+
+  for (let i = 0; i < sample.length; i++) {
+    if (sample[i] === 0) {
+      if (i % 2 === 0) evenNulls += 1;
+      else oddNulls += 1;
+    }
+  }
+
+  if (oddNulls > sample.length / 4) {
+    return buffer.toString("utf16le");
+  }
+
+  if (evenNulls > sample.length / 4) {
+    return decodeUtf16Be(buffer);
+  }
+
+  return buffer.toString("utf8");
+}
+
+function sanitizeTallyXmlResponse(value: any) {
+  return (
+    String(value ?? "")
+      .replace(/^\uFEFF/, "")
+      /**
+       * Tally sometimes returns invalid XML control chars as numeric refs like &#4;
+       * and sometimes as literal control chars. Both break browser/XML parsing.
+       */
+      .replace(
+        /&#(?:x0*(?:[0-8bcef]|1[0-9a-f])|0*(?:[0-8]|1[0-9]|2[0-9]|3[01]));/gi,
+        "",
+      )
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
+  );
 }
 
 function escapeXml(value: string) {
@@ -36,22 +109,6 @@ function escapeXml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
-}
-
-function sanitizeTallyXmlResponse(value: any) {
-  return (
-    String(value ?? "")
-      /**
-       * Tally sometimes returns invalid XML control chars as numeric refs like &#4;
-       * and sometimes as literal control chars. Both break browser/XML parsing.
-       * Regex-based parser works after cleanup.
-       */
-      .replace(
-        /&#(?:x0*(?:[0-8bcef]|1[0-9a-f])|0*(?:[0-8]|1[0-9]|2[0-9]|3[01]));/gi,
-        "",
-      )
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "")
-  );
 }
 
 function buildStaticVariables(companyName?: string | null, extra?: string) {
@@ -237,6 +294,41 @@ export async function fetchOutstandingsXml(
           ${buildDateRangeFilterFormula(dateRange)}
         </TDLMESSAGE>
       </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+
+  return postToTally(xml);
+}
+
+export type OutstandingReportType = "receivable" | "payable";
+
+export async function fetchOutstandingReportXml(
+  companyName: string | undefined,
+  reportType: OutstandingReportType,
+  dateRange?: TallyDateRange,
+) {
+  const reportName =
+    reportType === "receivable" ? "Bills Receivable" : "Bills Payable";
+
+  const xml = `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>${escapeXml(reportName)}</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      ${buildStaticVariables(
+        companyName,
+        `
+        ${buildDateRangeVariables(dateRange)}
+        <EXPLODEFLAG>Yes</EXPLODEFLAG>
+        `,
+      )}
     </DESC>
   </BODY>
 </ENVELOPE>

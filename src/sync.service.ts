@@ -20,7 +20,7 @@ import {
 import {
   fetchCostCentersXml,
   fetchLedgersXml,
-  fetchOutstandingsXml,
+  fetchOutstandingReportXml,
   fetchPurchaseOrdersXml,
   fetchSalesOrdersXml,
   fetchStockItemsXml,
@@ -321,10 +321,56 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       batchSize: 20,
     });
 
-    const outstandingsXml = await fetchOutstandingsXml(company.name, dateRange);
-    const outstandingXmlText = String(outstandingsXml || "");
+    /**
+     * RDP-safe outstanding pull:
+     * Use official Tally reports instead of Voucher BillAllocations.
+     * This matches Tally UI: Display > Statements of Accounts > Outstandings.
+     */
+    const receivableXml = await fetchOutstandingReportXml(
+      company.name,
+      "receivable",
+      dateRange,
+    );
 
-    const parsedOutstandings = parseOutstandings(outstandingXmlText);
+    const payableXml = await fetchOutstandingReportXml(
+      company.name,
+      "payable",
+      dateRange,
+    );
+
+    const receivableOutstandings = parseOutstandings(
+      String(receivableXml || ""),
+    ).map((row) => ({
+      ...row,
+      billType: "receivable",
+      bill_type: "receivable",
+      voucherType: row.voucherType || "Bills Receivable",
+      voucherTypeName: row.voucherTypeName || "Bills Receivable",
+      voucher_type_name: row.voucher_type_name || "Bills Receivable",
+    }));
+
+    const payableOutstandings = parseOutstandings(String(payableXml || "")).map(
+      (row) => ({
+        ...row,
+        billType: "payable",
+        bill_type: "payable",
+        voucherType: row.voucherType || "Bills Payable",
+        voucherTypeName: row.voucherTypeName || "Bills Payable",
+        voucher_type_name: row.voucher_type_name || "Bills Payable",
+      }),
+    );
+
+    const parsedOutstandings = [
+      ...receivableOutstandings,
+      ...payableOutstandings,
+    ];
+
+    console.log("[TALLY] Outstanding official reports parsed", {
+      company: company.name,
+      receivable: receivableOutstandings.length,
+      payable: payableOutstandings.length,
+      total: parsedOutstandings.length,
+    });
 
     const outstandings = attachCompany(
       enrichOutstandingsWithLedgerGuid(parsedOutstandings, ledgers),

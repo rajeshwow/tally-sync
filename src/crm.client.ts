@@ -93,37 +93,64 @@ function normalizeBatchSize(value: any, fallback = 20) {
   return Math.floor(batchSize);
 }
 
+function getCrmRetryAttempts() {
+  return Math.max(1, Number(process.env.CRM_RETRY_ATTEMPTS || 2));
+}
+
+function shouldStripRawTallyData() {
+  return String(process.env.CRM_STRIP_RAW_TALLY_DATA || "true")
+    .trim()
+    .toLowerCase() !== "false";
+}
+
+function stripRawTallyData(value: any): any {
+  if (!shouldStripRawTallyData()) return value;
+
+  if (Array.isArray(value)) {
+    return value.map((item) => stripRawTallyData(item));
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const cleaned: Record<string, any> = {};
+
+  for (const [key, item] of Object.entries(value)) {
+    if (key === "rawTallyData" || key === "raw_tally_data") continue;
+    cleaned[key] = stripRawTallyData(item);
+  }
+
+  return cleaned;
+}
+
 function buildCrmPayload(input: {
   moduleName: string;
   batch: any[];
   meta: Record<string, any>;
 }) {
+  const batch = stripRawTallyData(input.batch);
+
   const payload: Record<string, any> = {
-    records: input.batch,
+    records: batch,
     meta: input.meta,
   };
 
   /**
-   * Keep records as primary payload.
-   * Add backward-compatible aliases only for transaction modules so existing
-   * backend handlers that read module-specific arrays also work.
+   * Keep records as primary payload and only one legacy alias.
+   * Older version was sending 3-4 duplicate arrays, which made RDP payloads
+   * heavy and caused CRM timeouts for real Tally vouchers.
    */
   if (input.moduleName === "sales-orders") {
-    payload.salesOrders = input.batch;
-    payload.sales_orders = input.batch;
-    payload.orders = input.batch;
+    payload.salesOrders = batch;
   }
 
   if (input.moduleName === "purchase-orders") {
-    payload.purchaseOrders = input.batch;
-    payload.purchase_orders = input.batch;
-    payload.orders = input.batch;
+    payload.purchaseOrders = batch;
   }
 
   if (input.moduleName === "outstandings") {
-    payload.outstandings = input.batch;
-    payload.outstandingRecords = input.batch;
-    payload.outstanding_records = input.batch;
+    payload.outstandings = batch;
   }
 
   return payload;
@@ -217,8 +244,9 @@ async function postWithRetry(
     const err = error as AxiosError<any>;
 
     const status = err.response?.status;
+    const maxAttempts = getCrmRetryAttempts();
     const canRetry =
-      attempt < 3 &&
+      attempt < maxAttempts &&
       (!status || status === 408 || status === 429 || status >= 500);
 
     console.error("[CRM CLIENT] Push failed", {

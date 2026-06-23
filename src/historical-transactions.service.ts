@@ -4,9 +4,20 @@ import {
   pushSalesOrdersToCrm,
 } from "./crm.client";
 
-import { parsePurchaseVouchers, parseSalesVouchers } from "./mapper";
+import {
+  parseOutstandings,
+  parsePurchaseVouchers,
+  parseSalesVouchers,
+} from "./mapper";
 
 import {
+  clearHistoricalSyncCheckpoints,
+  getSyncCheckpoint,
+  markSyncCheckpoint,
+} from "./sync-checkpoint.store";
+
+import {
+  fetchHistoricalOutstandingVouchersXml,
   fetchHistoricalPurchaseVouchersXml,
   fetchHistoricalSalesVouchersXml,
   fetchTallyCompaniesXml,
@@ -31,6 +42,8 @@ type HistoricalTransactionsRequest = {
    * Accepted: sales-vouchers, purchase-vouchers, outstandings
    */
   modules?: HistoricalTransactionModule[];
+  /** Optional. Clears successful checkpoints for selected module/company before running. */
+  forceRestart?: boolean;
 };
 
 type TallyCompanyForTransactions = {
@@ -41,7 +54,7 @@ type TallyCompanyForTransactions = {
 };
 
 type HistoricalTransactionsStatus = {
-  status: "idle" | "running" | "success" | "failed";
+  status: "idle" | "running" | "success" | "partial_success" | "failed";
   isRunning: boolean;
   startedAt: string | null;
   completedAt: string | null;
@@ -65,6 +78,8 @@ type HistoricalTransactionsStatus = {
     pulledRecords: number;
     uploadedRecords: number;
     skippedDuplicateRecords: number;
+    skippedCheckpointRanges: number;
+    failedRanges: number;
     outstandingReceivableRows: number;
     outstandingPayableRows: number;
   };
@@ -107,6 +122,8 @@ const historicalTransactionsStatus: HistoricalTransactionsStatus = {
     pulledRecords: 0,
     uploadedRecords: 0,
     skippedDuplicateRecords: 0,
+    skippedCheckpointRanges: 0,
+    failedRanges: 0,
     outstandingReceivableRows: 0,
     outstandingPayableRows: 0,
   },
@@ -236,6 +253,20 @@ function buildCleanConsoleLog(
     return `📅 Range started | ${range}`;
   }
 
+  if (message === "Historical transaction range skipped by checkpoint") {
+    return `⏭️ Skipped | ${details?.moduleName || "-"} | ${range} | alreadyUploaded=${formatLogNumber(details?.uploadedRecords)}`;
+  }
+
+  if (
+    message === "Historical transaction range failed but sync will continue"
+  ) {
+    return `❌ Range failed | ${details?.moduleName || "-"} | ${range} | continuing | error=${details?.error || "unknown"}`;
+  }
+
+  if (message === "Historical checkpoints cleared") {
+    return `🧹 Checkpoints cleared | modules=${(details?.modules || []).join(", ") || "-"} | company=${details?.companyName || "ALL"}`;
+  }
+
   if (message === "Sales voucher range collected") {
     return `✅ SO collected | ${range} | raw=${formatLogNumber(details?.raw)} | inRange=${formatLogNumber(details?.inRange)} | push=${formatLogNumber(details?.pushRecords)} | dup=${formatLogNumber(details?.duplicates)}`;
   }
@@ -281,7 +312,11 @@ function buildCleanConsoleLog(
   }
 
   if (message === "Historical transaction sync completed") {
-    return `🎉 Historical TX completed | pulled=${formatLogNumber(details?.summary?.pulledRecords)} | uploaded=${formatLogNumber(details?.summary?.uploadedRecords)} | duplicates=${formatLogNumber(details?.summary?.skippedDuplicateRecords)}`;
+    return `✅ SUCCESS | Historical TX completed | pulled=${formatLogNumber(details?.summary?.pulledRecords)} | uploaded=${formatLogNumber(details?.summary?.uploadedRecords)} | skipped=${formatLogNumber(details?.summary?.skippedCheckpointRanges)} | duplicates=${formatLogNumber(details?.summary?.skippedDuplicateRecords)}`;
+  }
+
+  if (message === "Historical transaction sync completed with failures") {
+    return `⚠️ PARTIAL | Historical TX completed with failures | failed=${formatLogNumber(details?.failed)} | pulled=${formatLogNumber(details?.summary?.pulledRecords)} | uploaded=${formatLogNumber(details?.summary?.uploadedRecords)} | skipped=${formatLogNumber(details?.summary?.skippedCheckpointRanges)}`;
   }
 
   if (level === "error") {
@@ -810,6 +845,127 @@ function uniqueBy<T>(
   return { records: unique, duplicateCount };
 }
 
+function getErrorMessage(error: any) {
+  return (
+    error?.response?.data?.message ||
+    error?.response?.data?.error ||
+    error?.message ||
+    "Unknown error"
+  );
+}
+
+function getResultTotalRecords(result: any) {
+  return Number(result?.pushed ?? result?.parsed ?? result?.inRange ?? 0) || 0;
+}
+
+function getResultUploadedRecords(result: any) {
+  return Number(result?.uploaded ?? result?.uploadedRecords ?? 0) || 0;
+}
+
+async function runCheckpointedTxRange(input: {
+  company: TallyCompanyForTransactions;
+  moduleName: HistoricalTransactionModule;
+  dateRange: TallyDateRange;
+  run: () => Promise<any>;
+}) {
+  const checkpointBase = {
+    mode: "historical" as const,
+    companyName: input.company.name,
+    companyGuid: input.company.guid || null,
+    moduleName: input.moduleName,
+    fromDate: input.dateRange.fromDate,
+    toDate: input.dateRange.toDate,
+  };
+
+  const existing = getSyncCheckpoint(checkpointBase);
+
+  if (existing?.status === "success") {
+    historicalTransactionsStatus.summary.skippedCheckpointRanges += 1;
+
+    addEvent("info", "Historical transaction range skipped by checkpoint", {
+      company: input.company.name,
+      moduleName: input.moduleName,
+      fromDate: input.dateRange.fromDate,
+      toDate: input.dateRange.toDate,
+      uploadedRecords: existing.uploadedRecords || 0,
+    });
+
+    return {
+      status: "skipped" as const,
+      result: null,
+      error: null,
+      checkpoint: existing,
+    };
+  }
+
+  markSyncCheckpoint({
+    ...checkpointBase,
+    status: "running",
+    totalRecords: existing?.totalRecords || 0,
+    uploadedRecords: existing?.uploadedRecords || 0,
+    failedRecords: existing?.failedRecords || 0,
+    startedAt: nowIso(),
+    completedAt: null,
+    errorMessage: null,
+  });
+
+  try {
+    const result = await input.run();
+    const totalRecords = getResultTotalRecords(result);
+    const uploadedRecords = getResultUploadedRecords(result);
+
+    markSyncCheckpoint({
+      ...checkpointBase,
+      status: "success",
+      totalRecords,
+      uploadedRecords,
+      failedRecords: 0,
+      completedAt: nowIso(),
+      errorMessage: null,
+    });
+
+    return {
+      status: "success" as const,
+      result,
+      error: null,
+      checkpoint: null,
+    };
+  } catch (error: any) {
+    const message = getErrorMessage(error);
+
+    historicalTransactionsStatus.summary.failedRanges += 1;
+
+    markSyncCheckpoint({
+      ...checkpointBase,
+      status: "failed",
+      totalRecords: existing?.totalRecords || 0,
+      uploadedRecords: existing?.uploadedRecords || 0,
+      failedRecords: 1,
+      completedAt: nowIso(),
+      errorMessage: message,
+    });
+
+    addEvent(
+      "error",
+      "Historical transaction range failed but sync will continue",
+      {
+        company: input.company.name,
+        moduleName: input.moduleName,
+        fromDate: input.dateRange.fromDate,
+        toDate: input.dateRange.toDate,
+        error: message,
+      },
+    );
+
+    return {
+      status: "failed" as const,
+      result: null,
+      error: message,
+      checkpoint: null,
+    };
+  }
+}
+
 function getEnabledModules(
   modules?: HistoricalTransactionModule[],
 ): HistoricalTransactionModule[] {
@@ -904,35 +1060,43 @@ function parseOfficialBillWiseOutstandingReport(input: {
   billType: OfficialOutstandingReportType;
   company: TallyCompanyForTransactions;
 }) {
-  const source = String(input.xml || "");
+  const source = String(input.xml || "").replace(/\u0000/g, "");
   const rows: any[] = [];
 
   /**
-   * Official Tally Bills Receivable/Payable report returns this repeated shape:
+   * RDP Tally official Bills Receivable/Payable report can return:
    *
    * <BILLFIXED>...</BILLFIXED>
+   * <CCM_BILL...></CCM_BILL...>
    * <BILLCL>...</BILLCL>
    * <BILLDUE>...</BILLDUE>
    * <BILLOVERDUE>...</BILLOVERDUE>
+   *
+   * So do not expect BILLCL directly after BILLFIXED.
    */
-  const re =
-    /<BILLFIXED\b[\s\S]*?<\/BILLFIXED>\s*<BILLCL[^>]*>([\s\S]*?)<\/BILLCL>\s*<BILLDUE[^>]*>([\s\S]*?)<\/BILLDUE>\s*<BILLOVERDUE[^>]*>([\s\S]*?)<\/BILLOVERDUE>/gi;
+  const segments =
+    source.match(/<BILLFIXED\b[\s\S]*?(?=<BILLFIXED\b|<\/ENVELOPE>|$)/gi) || [];
 
-  let match: RegExpExecArray | null;
-
-  while ((match = re.exec(source))) {
-    const fullBlock = match[0];
-    const fixedBlockMatch = fullBlock.match(
-      /<BILLFIXED\b[\s\S]*?<\/BILLFIXED>/i,
-    );
-    const fixedBlock = fixedBlockMatch?.[0] || "";
+  for (const segment of segments) {
+    const fixedBlock =
+      segment.match(/<BILLFIXED\b[\s\S]*?<\/BILLFIXED>/i)?.[0] || segment;
 
     const ledgerName = stripXml(readTag(fixedBlock, "BILLPARTY"));
     const billRef = stripXml(readTag(fixedBlock, "BILLREF"));
     const billDateRaw = stripXml(readTag(fixedBlock, "BILLDATE"));
-    const billCloseRaw = stripXml(match[1]);
-    const dueDateRaw = stripXml(match[2]);
-    const overdueDaysRaw = stripXml(match[3]);
+
+    const billCloseRaw =
+      stripXml(readTag(segment, "BILLCL")) ||
+      stripXml(readTag(segment, "BILLCLOSING")) ||
+      stripXml(readTag(segment, "CLOSINGBALANCE")) ||
+      stripXml(readTag(segment, "PENDINGAMOUNT"));
+
+    const dueDateRaw =
+      stripXml(readTag(segment, "BILLDUE")) ||
+      stripXml(readTag(segment, "BILLDUEDATE")) ||
+      stripXml(readTag(segment, "DUEDATE"));
+
+    const overdueDaysRaw = stripXml(readTag(segment, "BILLOVERDUE"));
 
     const pendingAmount = toAbsNumber(billCloseRaw);
     const billDate = normalizeTallyDate(billDateRaw);
@@ -947,7 +1111,7 @@ function parseOfficialBillWiseOutstandingReport(input: {
       ledgerGuid: null,
 
       voucherGuid: null,
-      voucherNo: null,
+      voucherNo: billRef,
       voucherNumber: billRef,
       voucherType:
         input.billType === "receivable" ? "Bills Receivable" : "Bills Payable",
@@ -1000,8 +1164,8 @@ function parseOfficialBillWiseOutstandingReport(input: {
       report_name:
         input.billType === "receivable" ? "Bills Receivable" : "Bills Payable",
 
-      rawTallyData: fullBlock,
-      raw_tally_data: fullBlock,
+      rawTallyData: segment,
+      raw_tally_data: segment,
 
       tallyCompanyName: input.company.name,
       tallyCompanyGuid: input.company.guid || null,
@@ -1504,8 +1668,40 @@ async function pushOfficialOutstandings(input: {
     payableRows: payableRows.length,
   });
 
+  let outstandingRows = [...receivableRows, ...payableRows];
+
+  if (!outstandingRows.length) {
+    addEvent(
+      "warn",
+      "Official outstanding report returned zero rows, voucher fallback started",
+      {
+        company: company.name,
+        fromDate,
+        toDate,
+      },
+    );
+
+    const fallbackXml = await runWithTallyRetry(
+      `Outstanding voucher fallback ${company.name} ${fromDate}-${toDate}`,
+      () =>
+        fetchHistoricalOutstandingVouchersXml(company.name, {
+          fromDate,
+          toDate,
+        }),
+    );
+
+    outstandingRows = parseOutstandings(String(fallbackXml || ""));
+
+    addEvent("info", "Outstanding voucher fallback parsed", {
+      company: company.name,
+      rows: outstandingRows.length,
+      fromDate,
+      toDate,
+    });
+  }
+
   const guarded = applyOfficialOutstandingDateGuard({
-    records: [...receivableRows, ...payableRows],
+    records: outstandingRows,
     fromDate,
     toDate,
   });
@@ -1622,11 +1818,17 @@ async function syncCompanyTransactions(input: {
 }) {
   const { company, fromDate, toDate, modules } = input;
   const rangeMonths = getRangeChunkMonths();
-  const ranges = buildDateRanges({
-    fromDate,
-    toDate,
-    chunkMonths: rangeMonths,
-  });
+  const shouldSyncSales = modules.includes("sales-vouchers");
+  const shouldSyncPurchase = modules.includes("purchase-vouchers");
+  const shouldRunVoucherRanges = shouldSyncSales || shouldSyncPurchase;
+
+  const ranges = shouldRunVoucherRanges
+    ? buildDateRanges({
+        fromDate,
+        toDate,
+        chunkMonths: rangeMonths,
+      })
+    : [];
 
   const companyResult: any = {
     company: {
@@ -1641,6 +1843,8 @@ async function syncCompanyTransactions(input: {
     salesVouchers: [],
     purchaseVouchers: [],
     outstandings: null,
+    skipped: [],
+    errors: [],
   };
 
   historicalTransactionsStatus.activeCompany = company.name;
@@ -1658,9 +1862,6 @@ async function syncCompanyTransactions(input: {
     rangeMonths,
   });
 
-  const shouldSyncSales = modules.includes("sales-vouchers");
-  const shouldSyncPurchase = modules.includes("purchase-vouchers");
-
   for (const dateRange of ranges) {
     addEvent("info", "Transaction range started", {
       company: company.name,
@@ -1675,25 +1876,81 @@ async function syncCompanyTransactions(input: {
     let purchaseResult: any = null;
 
     if (shouldSyncSales) {
-      salesResult = await pushSalesVoucherRange({
+      const salesRun = await runCheckpointedTxRange({
         company,
+        moduleName: "sales-vouchers",
         dateRange,
+        run: () =>
+          pushSalesVoucherRange({
+            company,
+            dateRange,
+          }),
       });
 
-      companyResult.salesVouchers.push(salesResult);
-      historicalTransactionsStatus.summary.modulesCompleted += 1;
-      historicalTransactionsStatus.summary.rangesCompleted += 1;
+      if (salesRun.status === "success") {
+        salesResult = salesRun.result;
+        companyResult.salesVouchers.push(salesResult);
+        historicalTransactionsStatus.summary.modulesCompleted += 1;
+        historicalTransactionsStatus.summary.rangesCompleted += 1;
+      }
+
+      if (salesRun.status === "skipped") {
+        companyResult.skipped.push({
+          moduleName: "sales-vouchers",
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+        });
+        historicalTransactionsStatus.summary.modulesCompleted += 1;
+        historicalTransactionsStatus.summary.rangesCompleted += 1;
+      }
+
+      if (salesRun.status === "failed") {
+        companyResult.errors.push({
+          moduleName: "sales-vouchers",
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+          error: salesRun.error,
+        });
+      }
     }
 
     if (shouldSyncPurchase) {
-      purchaseResult = await pushPurchaseVoucherRange({
+      const purchaseRun = await runCheckpointedTxRange({
         company,
+        moduleName: "purchase-vouchers",
         dateRange,
+        run: () =>
+          pushPurchaseVoucherRange({
+            company,
+            dateRange,
+          }),
       });
 
-      companyResult.purchaseVouchers.push(purchaseResult);
-      historicalTransactionsStatus.summary.modulesCompleted += 1;
-      historicalTransactionsStatus.summary.rangesCompleted += 1;
+      if (purchaseRun.status === "success") {
+        purchaseResult = purchaseRun.result;
+        companyResult.purchaseVouchers.push(purchaseResult);
+        historicalTransactionsStatus.summary.modulesCompleted += 1;
+        historicalTransactionsStatus.summary.rangesCompleted += 1;
+      }
+
+      if (purchaseRun.status === "skipped") {
+        companyResult.skipped.push({
+          moduleName: "purchase-vouchers",
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+        });
+        historicalTransactionsStatus.summary.modulesCompleted += 1;
+        historicalTransactionsStatus.summary.rangesCompleted += 1;
+      }
+
+      if (purchaseRun.status === "failed") {
+        companyResult.errors.push({
+          moduleName: "purchase-vouchers",
+          fromDate: dateRange.fromDate,
+          toDate: dateRange.toDate,
+          error: purchaseRun.error,
+        });
+      }
     }
 
     addEvent("info", "Transaction range completed", {
@@ -1706,12 +1963,40 @@ async function syncCompanyTransactions(input: {
   }
 
   if (modules.includes("outstandings")) {
-    companyResult.outstandings = await pushOfficialOutstandings({
+    const outstandingRun = await runCheckpointedTxRange({
       company,
-      fromDate,
-      toDate,
+      moduleName: "outstandings",
+      dateRange: { fromDate, toDate },
+      run: () =>
+        pushOfficialOutstandings({
+          company,
+          fromDate,
+          toDate,
+        }),
     });
-    historicalTransactionsStatus.summary.modulesCompleted += 1;
+
+    if (outstandingRun.status === "success") {
+      companyResult.outstandings = outstandingRun.result;
+      historicalTransactionsStatus.summary.modulesCompleted += 1;
+    }
+
+    if (outstandingRun.status === "skipped") {
+      companyResult.skipped.push({
+        moduleName: "outstandings",
+        fromDate,
+        toDate,
+      });
+      historicalTransactionsStatus.summary.modulesCompleted += 1;
+    }
+
+    if (outstandingRun.status === "failed") {
+      companyResult.errors.push({
+        moduleName: "outstandings",
+        fromDate,
+        toDate,
+        error: outstandingRun.error,
+      });
+    }
   }
 
   historicalTransactionsStatus.summary.companiesCompleted += 1;
@@ -1783,6 +2068,8 @@ export async function runHistoricalTransactionsSync(
       pulledRecords: 0,
       uploadedRecords: 0,
       skippedDuplicateRecords: 0,
+      skippedCheckpointRanges: 0,
+      failedRanges: 0,
       outstandingReceivableRows: 0,
       outstandingPayableRows: 0,
     },
@@ -1798,6 +2085,20 @@ export async function runHistoricalTransactionsSync(
     outstandingApproach:
       "Official Tally Bills Receivable + Bills Payable report",
   });
+
+  if (input?.forceRestart) {
+    for (const moduleName of modules) {
+      clearHistoricalSyncCheckpoints({
+        companyName: input?.companyName || null,
+        moduleName,
+      });
+    }
+
+    addEvent("info", "Historical checkpoints cleared", {
+      companyName: input?.companyName || "ALL",
+      modules,
+    });
+  }
 
   try {
     const companies = await getCompaniesForSync();
@@ -1866,11 +2167,17 @@ export async function runHistoricalTransactionsSync(
     }
 
     const completedAt = nowIso();
+    const failedItems = companyResults.flatMap(
+      (item: any) => item.errors || [],
+    );
+    const finalStatus = failedItems.length ? "partial_success" : "success";
 
     const result = {
       skipped: false,
-      status: "success",
-      message: "Historical transaction sync completed",
+      status: finalStatus,
+      message: failedItems.length
+        ? "Historical transaction sync completed with failures"
+        : "Historical transaction sync completed",
       startedAt,
       completedAt,
       modules,
@@ -1883,23 +2190,33 @@ export async function runHistoricalTransactionsSync(
         toDate: plan.toDate,
       })),
       summary: { ...historicalTransactionsStatus.summary },
+      failedItems,
       companyResults,
     };
 
     patchStatus({
-      status: "success",
+      status: finalStatus,
       isRunning: false,
       completedAt,
-      error: null,
+      error: failedItems.length
+        ? `${failedItems.length} historical transaction range(s) failed. Re-run the same route; successful checkpoints will be skipped and failed ranges will retry.`
+        : null,
       activeCompany: null,
       activeModule: null,
       activeRange: null,
       lastResult: result,
     });
 
-    addEvent("info", "Historical transaction sync completed", {
-      summary: result.summary,
-    });
+    if (failedItems.length) {
+      addEvent("error", "Historical transaction sync completed with failures", {
+        failed: failedItems.length,
+        summary: result.summary,
+      });
+    } else {
+      addEvent("info", "Historical transaction sync completed", {
+        summary: result.summary,
+      });
+    }
 
     return result;
   } catch (error: any) {

@@ -155,9 +155,11 @@ export function markSyncCheckpoint(input: Omit<SyncCheckpointRecord, "key">) {
 export function clearHistoricalSyncCheckpoints(input?: {
   companyName?: string | null;
   companyGuid?: string | null;
+  moduleName?: string | null;
 }) {
   const store = readStore();
   const companyKey = normalize(input?.companyGuid || input?.companyName || "");
+  const moduleKey = normalize(input?.moduleName || "");
 
   for (const key of Object.keys(store.records)) {
     const record = store.records[key];
@@ -170,6 +172,8 @@ export function clearHistoricalSyncCheckpoints(input?: {
       );
       if (recordCompanyKey !== companyKey) continue;
     }
+
+    if (moduleKey && normalize(record.moduleName) !== moduleKey) continue;
 
     delete store.records[key];
   }

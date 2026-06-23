@@ -501,6 +501,51 @@ function normalizeDate(value?: string | null) {
 
   const text = String(value).trim();
 
+  const monthMap: Record<string, string> = {
+    jan: "01",
+    january: "01",
+    feb: "02",
+    february: "02",
+    mar: "03",
+    march: "03",
+    apr: "04",
+    april: "04",
+    may: "05",
+    jun: "06",
+    june: "06",
+    jul: "07",
+    july: "07",
+    aug: "08",
+    august: "08",
+    sep: "09",
+    sept: "09",
+    september: "09",
+    oct: "10",
+    october: "10",
+    nov: "11",
+    november: "11",
+    dec: "12",
+    december: "12",
+  };
+
+  const textDate = text.match(
+    /^(\d{1,2})[-/\s]+([a-zA-Z]{3,9})[-/\s]+(\d{2,4})$/,
+  );
+
+  if (textDate) {
+    const day = textDate[1].padStart(2, "0");
+    const month = monthMap[textDate[2].toLowerCase()];
+    let year = Number(textDate[3]);
+
+    if (!month) return null;
+
+    if (year < 100) {
+      year = year >= 70 ? 1900 + year : 2000 + year;
+    }
+
+    return `${year}-${month}-${day}`;
+  }
+
   // Tally sometimes gives YYYYMMDD
   if (/^\d{8}$/.test(text)) {
     return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
@@ -992,6 +1037,128 @@ function parseVoucherItems(voucherBlock: string) {
     .filter((item) => item.stockItemName);
 }
 
+function inferOfficialBillReportType(xml: string) {
+  return /bills payable|bill payable|payable/i.test(xml)
+    ? "payable"
+    : "receivable";
+}
+
+function parseOfficialBillFixedOutstandingRows(xml: string) {
+  const source = String(xml || "").replace(/\u0000/g, "");
+  const billType = inferOfficialBillReportType(source);
+  const voucherType =
+    billType === "receivable" ? "Bills Receivable" : "Bills Payable";
+
+  const segments =
+    source.match(/<BILLFIXED\b[\s\S]*?(?=<BILLFIXED\b|<\/ENVELOPE>|$)/gi) || [];
+
+  return segments
+    .map((segment) => {
+      const fixedBlock =
+        segment.match(/<BILLFIXED\b[\s\S]*?<\/BILLFIXED>/i)?.[0] || segment;
+
+      const ledgerName =
+        stripXml(readTag(fixedBlock, "BILLPARTY")) ||
+        stripXml(readTag(fixedBlock, "LEDGERNAME")) ||
+        stripXml(readTag(fixedBlock, "PARTYLEDGERNAME")) ||
+        stripXml(readTag(fixedBlock, "PARTYNAME"));
+
+      const billRef =
+        stripXml(readTag(fixedBlock, "BILLREF")) ||
+        stripXml(readTag(fixedBlock, "BILLNAME")) ||
+        stripXml(readTag(fixedBlock, "REFERENCE")) ||
+        stripXml(readTag(fixedBlock, "NAME"));
+
+      const billDate =
+        readTallyDate(fixedBlock, "BILLDATE") ||
+        readTallyDate(fixedBlock, "DATE");
+
+      const pendingAmountRaw =
+        stripXml(readTag(segment, "BILLCL")) ||
+        stripXml(readTag(segment, "BILLCLOSING")) ||
+        stripXml(readTag(segment, "CLOSINGBALANCE")) ||
+        stripXml(readTag(segment, "PENDINGAMOUNT")) ||
+        stripXml(readTag(segment, "AMOUNT"));
+
+      const pendingAmount = toAbsNumberLike(pendingAmountRaw);
+
+      const dueDate =
+        readTallyDate(segment, "BILLDUE") ||
+        readTallyDate(segment, "BILLDUEDATE") ||
+        readTallyDate(segment, "DUEDATE") ||
+        billDate;
+
+      const overdueDaysRaw =
+        stripXml(readTag(segment, "BILLOVERDUE")) ||
+        stripXml(readTag(segment, "OVERDUEDAYS"));
+
+      return {
+        ledgerName,
+        ledgerGuid: null,
+
+        voucherGuid: null,
+        voucherNo: billRef || null,
+        voucherNumber: billRef || null,
+        voucherType,
+
+        voucherDate: billDate,
+        dueDate,
+
+        billRef,
+        billType,
+        openingAmount: pendingAmount,
+        billAmount: pendingAmount,
+        pendingAmount,
+        outstandingAmount: pendingAmount,
+
+        costCenterName: null,
+        cost_center_name: null,
+
+        costCategory: null,
+        cost_category: null,
+
+        costCenterAmount: 0,
+        cost_center_amount: 0,
+
+        costCenterAllocations: [],
+        cost_center_allocations: [],
+
+        overdueDays: toAbsNumberLike(overdueDaysRaw),
+        drCr: getDrCr(pendingAmountRaw),
+
+        partyType: null,
+        tallyGuid: null,
+        tally_guid: null,
+
+        ledger_guid: null,
+        ledger_name: ledgerName,
+
+        voucher_guid: null,
+        voucher_number: billRef || null,
+        voucher_no: billRef || null,
+
+        voucherTypeName: voucherType,
+        voucher_type_name: voucherType,
+
+        voucher_date: billDate,
+        due_date: dueDate,
+
+        bill_ref: billRef,
+        bill_type: billType,
+
+        rawTallyData: segment,
+        raw_tally_data: segment,
+      };
+    })
+    .filter(
+      (row) =>
+        row.ledgerName &&
+        row.billRef &&
+        row.pendingAmount > 0 &&
+        !isNonPartyOutstandingLedger(row.ledgerName),
+    );
+}
+
 export function parseOutstandings(xml: string) {
   const source = String(xml || "");
 
@@ -1085,6 +1252,12 @@ export function parseOutstandings(xml: string) {
           row.baseAmount > 0 &&
           row.pendingAmount > 0,
       );
+  }
+
+  const officialBillRows = parseOfficialBillFixedOutstandingRows(source);
+
+  if (officialBillRows.length) {
+    return officialBillRows;
   }
 
   let blocks = extractBlocks(source, "BILLFIXED");

@@ -319,7 +319,11 @@ app.get(
   },
 );
 
-app.post("/sync/historical-transactions", requireControlToken, (req, res) => {
+function startHistoricalTransactionRoute(
+  req: Request,
+  res: Response,
+  modules?: Array<"sales-vouchers" | "purchase-vouchers" | "outstandings">,
+) {
   if (isManualSyncRunning) {
     return res.status(409).json({
       statusCode: 409,
@@ -345,32 +349,12 @@ app.post("/sync/historical-transactions", requireControlToken, (req, res) => {
     });
   }
 
-  const result = startHistoricalTransactionsSyncInBackground({
-    fromDate: req.body?.fromDate || undefined,
-    toDate: req.body?.toDate || undefined,
-    companyName: req.body?.companyName || undefined,
-    modules: Array.isArray(req.body?.modules) ? req.body.modules : undefined,
-  });
-
-  return res.status(result.started ? 202 : 409).json({
-    statusCode: result.started ? 202 : 409,
-    message: result.message,
-    data: result.data,
-  });
-});
-
-/**
- * Alias for readability from CRM/backend/Postman.
- */
-app.post("/sync/transactions/historical", requireControlToken, (req, res) => {
-  if (isManualSyncRunning || isHistoricalSyncActive()) {
+  if (isHistoricalTransactionsSyncActive()) {
     return res.status(409).json({
       statusCode: 409,
-      message:
-        "Another sync is already running. Historical transaction sync skipped.",
+      message: "Historical transaction sync is already running.",
       data: {
         agent: getAgentStatus(),
-        historical: getHistoricalSyncStatus(),
         historicalTransactions: getHistoricalTransactionsSyncStatus(),
       },
     });
@@ -380,7 +364,9 @@ app.post("/sync/transactions/historical", requireControlToken, (req, res) => {
     fromDate: req.body?.fromDate || undefined,
     toDate: req.body?.toDate || undefined,
     companyName: req.body?.companyName || undefined,
-    modules: Array.isArray(req.body?.modules) ? req.body.modules : undefined,
+    modules:
+      modules || (Array.isArray(req.body?.modules) ? req.body.modules : undefined),
+    forceRestart: Boolean(req.body?.forceRestart),
   });
 
   return res.status(result.started ? 202 : 409).json({
@@ -388,6 +374,85 @@ app.post("/sync/transactions/historical", requireControlToken, (req, res) => {
     message: result.message,
     data: result.data,
   });
+}
+
+app.get(
+  "/sync/historical/sales-vouchers/status",
+  requireControlToken,
+  (_req, res) => {
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Historical sales vouchers sync status fetched",
+      data: getHistoricalTransactionsSyncStatus(),
+    });
+  },
+);
+
+app.get(
+  "/sync/historical/purchase-vouchers/status",
+  requireControlToken,
+  (_req, res) => {
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Historical purchase vouchers sync status fetched",
+      data: getHistoricalTransactionsSyncStatus(),
+    });
+  },
+);
+
+app.get(
+  "/sync/historical/outstandings/status",
+  requireControlToken,
+  (_req, res) => {
+    return res.status(200).json({
+      statusCode: 200,
+      message: "Historical outstandings sync status fetched",
+      data: getHistoricalTransactionsSyncStatus(),
+    });
+  },
+);
+
+app.post(
+  "/sync/historical/sales-vouchers",
+  requireControlToken,
+  (req, res) => startHistoricalTransactionRoute(req, res, ["sales-vouchers"]),
+);
+
+app.post(
+  "/sync/historical/purchase-vouchers",
+  requireControlToken,
+  (req, res) =>
+    startHistoricalTransactionRoute(req, res, ["purchase-vouchers"]),
+);
+
+app.post(
+  "/sync/historical/outstandings",
+  requireControlToken,
+  (req, res) => startHistoricalTransactionRoute(req, res, ["outstandings"]),
+);
+
+// Short aliases for RDP/manual use.
+app.post("/sync/historical/so", requireControlToken, (req, res) =>
+  startHistoricalTransactionRoute(req, res, ["sales-vouchers"]),
+);
+
+app.post("/sync/historical/po", requireControlToken, (req, res) =>
+  startHistoricalTransactionRoute(req, res, ["purchase-vouchers"]),
+);
+
+app.post("/sync/historical/os", requireControlToken, (req, res) =>
+  startHistoricalTransactionRoute(req, res, ["outstandings"]),
+);
+
+app.post("/sync/historical-transactions", requireControlToken, (req, res) => {
+  return startHistoricalTransactionRoute(req, res);
+});
+
+/**
+ * Alias for readability from CRM/backend/Postman.
+ */
+app.post("/sync/transactions/historical", requireControlToken, (req, res) => {
+  return startHistoricalTransactionRoute(req, res);
 });
 
 if (process.env.DISABLE_AUTO_SYNC !== "true") {
