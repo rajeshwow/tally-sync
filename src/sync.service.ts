@@ -15,6 +15,7 @@ import {
   parseOutstandings,
   parsePurchaseOrders,
   parseSalesOrders,
+  parseStockGroups,
   parseStockItems,
 } from "./mapper";
 import {
@@ -23,6 +24,7 @@ import {
   fetchOutstandingReportXml,
   fetchPurchaseOrdersXml,
   fetchSalesOrdersXml,
+  fetchStockGroupsXml,
   fetchStockItemsXml,
   fetchTallyCompaniesXml,
   type TallyDateRange,
@@ -193,12 +195,41 @@ function getTodayStartDate() {
   return date;
 }
 
+function getNumberEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+function readBoolEnv(name: string, fallback: boolean) {
+  const raw = process.env[name];
+
+  if (raw === undefined) return fallback;
+
+  return ["1", "true", "yes", "y"].includes(raw.trim().toLowerCase());
+}
+
+function subtractDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() - days);
+  return next;
+}
+
 function buildIncrementalDateRange(lastSuccessfulSyncAt?: string | null) {
   const today = new Date();
+  const lookbackDays = getNumberEnv("DAILY_SYNC_LOOKBACK_DAYS", 3);
 
-  const fromDate = lastSuccessfulSyncAt
+  let fromDate = lastSuccessfulSyncAt
     ? new Date(lastSuccessfulSyncAt)
     : getTodayStartDate();
+
+  if (Number.isNaN(fromDate.getTime())) {
+    fromDate = getTodayStartDate();
+  }
+
+  if (lastSuccessfulSyncAt && lookbackDays > 0) {
+    fromDate = subtractDays(fromDate, lookbackDays);
+  }
 
   return {
     fromDate: formatTallyDate(fromDate),
@@ -256,7 +287,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_LEDGERS", 20),
     });
 
     const costCentersXml = await fetchCostCentersXml(company.name);
@@ -269,19 +300,30 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_COST_CENTERS", 20),
+    });
+
+    const stockGroupsXml = await fetchStockGroupsXml(company.name);
+    const stockGroups = parseStockGroups(String(stockGroupsXml || ""));
+
+    console.log("[TALLY] Stock groups parsed", {
+      company: company.name,
+      count: stockGroups.length,
     });
 
     const stockItemsXml = await fetchStockItemsXml(company.name);
     const stockXmlText = String(stockItemsXml || "");
 
-    const stockItems = attachCompany(parseStockItems(stockXmlText), company);
+    const stockItems = attachCompany(
+      parseStockItems(stockXmlText, stockGroups),
+      company,
+    );
 
     const stockItemResult = await pushStockItemsToCrm(stockItems, {
       companyName: company.name,
       companyGuid: company.guid,
       syncMode: "incremental",
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_STOCK_ITEMS", 20),
     });
 
     const salesOrdersXml = await fetchSalesOrdersXml(company.name, dateRange);
@@ -298,7 +340,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_SALES_ORDERS", 10),
     });
 
     const purchaseOrdersXml = await fetchPurchaseOrdersXml(
@@ -318,7 +360,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_PURCHASE_ORDERS", 20),
     });
 
     /**
@@ -326,16 +368,25 @@ async function syncOneCompany(company: TallyCompanyForSync) {
      * Use official Tally reports instead of Voucher BillAllocations.
      * This matches Tally UI: Display > Statements of Accounts > Outstandings.
      */
+    const shouldFilterOutstandingByDate = readBoolEnv(
+      "OUTSTANDING_REPORT_FILTER_FROM_DATE",
+      false,
+    );
+
+    const outstandingDateRange = shouldFilterOutstandingByDate
+      ? dateRange
+      : undefined;
+
     const receivableXml = await fetchOutstandingReportXml(
       company.name,
       "receivable",
-      dateRange,
+      outstandingDateRange,
     );
 
     const payableXml = await fetchOutstandingReportXml(
       company.name,
       "payable",
-      dateRange,
+      outstandingDateRange,
     );
 
     const receivableOutstandings = parseOutstandings(
@@ -383,7 +434,7 @@ async function syncOneCompany(company: TallyCompanyForSync) {
       syncMode: "incremental",
       fromDate: dateRange.fromDate,
       toDate: dateRange.toDate,
-      batchSize: 20,
+      batchSize: getNumberEnv("BATCH_SIZE_OUTSTANDINGS", 20),
     });
 
     const completedAt = new Date().toISOString();
@@ -448,6 +499,7 @@ export async function runFullSync() {
   if (isSyncRunning) {
     return {
       skipped: true,
+      status: "skipped",
       message: "Previous sync is still running",
     };
   }
@@ -463,11 +515,30 @@ export async function runFullSync() {
       );
     }
 
-    const companyResults = [];
+    const companyResults: any[] = [];
+    const failedCompanies: Array<{
+      company: TallyCompanyForSync;
+      error: string;
+    }> = [];
 
     for (const company of companies) {
-      const result = await syncOneCompany(company);
-      companyResults.push(result);
+      try {
+        const result = await syncOneCompany(company);
+        companyResults.push(result);
+      } catch (error: any) {
+        const message = error?.message || "Company sync failed";
+
+        failedCompanies.push({
+          company,
+          error: message,
+        });
+
+        console.error("[TALLY] Company sync failed. Continuing next company.", {
+          company: company.name,
+          companyGuid: company.guid,
+          message,
+        });
+      }
     }
 
     const totals = companyResults.reduce(
@@ -491,15 +562,26 @@ export async function runFullSync() {
       },
     );
 
+    const status =
+      companyResults.length === 0
+        ? "failed"
+        : failedCompanies.length > 0
+          ? "partial_success"
+          : "success";
+
     return {
       skipped: false,
+      status,
       syncMode: "incremental",
       companies: {
         count: companies.length,
+        successCount: companyResults.length,
+        failedCount: failedCompanies.length,
         records: companies,
       },
       totals,
       companyResults,
+      failedCompanies,
     };
   } finally {
     isSyncRunning = false;

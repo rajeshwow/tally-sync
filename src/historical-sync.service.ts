@@ -17,6 +17,7 @@ import {
   parseOutstandings,
   parsePurchaseOrders,
   parseSalesOrders,
+  parseStockGroups,
   parseStockItems,
 } from "./mapper";
 
@@ -26,6 +27,7 @@ import {
   fetchOutstandingsXml,
   fetchPurchaseOrdersXml,
   fetchSalesOrdersXml,
+  fetchStockGroupsXml,
   fetchStockItemsXml,
   fetchTallyCompaniesXml,
   type TallyDateRange,
@@ -1468,9 +1470,23 @@ async function syncCompanyMasters(company: TallyCompanyForSync) {
     status: "fetching",
   });
 
+  const stockGroupsXml = await fetchStockGroupsXml(company.name);
+  const stockGroups = parseStockGroups(String(stockGroupsXml || ""));
+
+  addSyncEvent({
+    level: "info",
+    moduleName: "stock-items",
+    companyName: company.name,
+    message: `Parsed ${stockGroups.length} stock groups for category mapping`,
+    details: {
+      companyGuid: company.guid,
+      stockGroups: stockGroups.length,
+    },
+  });
+
   const stockItemsXml = await fetchStockItemsXml(company.name);
   const stockItems = attachCompany(
-    parseStockItems(String(stockItemsXml || "")),
+    parseStockItems(String(stockItemsXml || ""), stockGroups),
     company,
   );
 

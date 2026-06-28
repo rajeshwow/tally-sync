@@ -39,6 +39,16 @@ function stripXml(value: string) {
     .trim();
 }
 
+function sanitizeTallyXmlText(value: any) {
+  return String(value ?? "")
+    .replace(/^\uFEFF/, "")
+    .replace(
+      /&#(?:x0*(?:[0-8bcef]|1[0-9a-f])|0*(?:[0-8]|1[0-9]|2[0-9]|3[01]));/gi,
+      "",
+    )
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, "");
+}
+
 function readName(block: string, tag: string) {
   return stripXml(readAttr(block, tag, "NAME") || readTag(block, "NAME"));
 }
@@ -364,7 +374,127 @@ export function parseCostCenters(xml: string) {
   return records;
 }
 
-export function parseStockItems(xml: string) {
+export type ParsedStockGroup = {
+  guid: string | null;
+  masterId: string | null;
+  alterId: string | null;
+  name: string;
+  parent: string | null;
+};
+
+function normalizeStockGroupKey(value?: string | null) {
+  return stripXml(String(value || ""))
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isPrimaryStockGroup(value?: string | null) {
+  const key = normalizeStockGroupKey(value);
+
+  return (
+    !key || key === "primary" || key === "* primary" || key === "not applicable"
+  );
+}
+
+export function parseStockGroups(xml: string): ParsedStockGroup[] {
+  const text = String(xml || "");
+
+  const closingBlocks =
+    text.match(/<STOCKGROUP\b[\s\S]*?<\/STOCKGROUP>/gi) || [];
+
+  const selfClosingBlocks = text.match(/<STOCKGROUP\b[^>]*\/>/gi) || [];
+
+  const blocks = [...closingBlocks, ...selfClosingBlocks];
+
+  const groups = blocks
+    .map((block) => {
+      const name = readName(block, "STOCKGROUP");
+
+      return {
+        guid: stripXml(readTag(block, "GUID")) || null,
+        masterId: stripXml(readTag(block, "MASTERID")) || null,
+        alterId: stripXml(readTag(block, "ALTERID")) || null,
+        name,
+        parent: stripXml(readTag(block, "PARENT")) || null,
+      };
+    })
+    .filter((group) => Boolean(group.name));
+
+  const uniqueByName = new Map<string, ParsedStockGroup>();
+
+  for (const group of groups) {
+    const key = normalizeStockGroupKey(group.name);
+
+    if (key && !uniqueByName.has(key)) {
+      uniqueByName.set(key, group);
+    }
+  }
+
+  return Array.from(uniqueByName.values());
+}
+
+function resolveStockGroupHierarchy(
+  stockItemParent: string,
+  stockGroups: ParsedStockGroup[] = [],
+) {
+  const immediateGroup = stripXml(stockItemParent) || "Uncategorized";
+
+  if (!immediateGroup || immediateGroup === "Uncategorized") {
+    return {
+      rootStockGroupName: "Uncategorized",
+      stockGroupName: "Uncategorized",
+      stockGroupPath: "Uncategorized",
+    };
+  }
+
+  const groupByName = new Map<string, ParsedStockGroup>();
+
+  for (const group of stockGroups) {
+    const key = normalizeStockGroupKey(group.name);
+
+    if (key) {
+      groupByName.set(key, group);
+    }
+  }
+
+  const chain: string[] = [];
+  const visited = new Set<string>();
+  let currentName: string | null = immediateGroup;
+
+  while (currentName && !isPrimaryStockGroup(currentName)) {
+    const currentKey = normalizeStockGroupKey(currentName);
+
+    if (!currentKey || visited.has(currentKey)) break;
+
+    visited.add(currentKey);
+    chain.push(currentName);
+
+    const currentGroup = groupByName.get(currentKey);
+    const parentName = stripXml(currentGroup?.parent || "");
+
+    if (!parentName || isPrimaryStockGroup(parentName)) break;
+
+    currentName = parentName;
+  }
+
+  const rootStockGroupName = chain.length
+    ? chain[chain.length - 1]
+    : immediateGroup;
+
+  return {
+    rootStockGroupName,
+    stockGroupName: immediateGroup,
+    stockGroupPath: chain.length
+      ? [...chain].reverse().join(" > ")
+      : immediateGroup,
+  };
+}
+
+export function parseStockItems(
+  xml: string,
+  stockGroups: ParsedStockGroup[] = [],
+) {
   const blocks =
     xml.match(/<STOCKITEM\b[\s\S]*?<\/STOCKITEM>/gi) ||
     xml.match(/<STOCKITEM\b[^>]*\/>/gi) ||
@@ -431,6 +561,12 @@ export function parseStockItems(xml: string) {
       const stockOnHand = closingQty || openingQty || baseQty || actualQty || 0;
       const availableForSale = stockOnHand;
 
+      const parent = stripXml(readTag(block, "PARENT")) || "Uncategorized";
+      const stockGroupHierarchy = resolveStockGroupHierarchy(
+        parent,
+        stockGroups,
+      );
+
       return {
         guid: stripXml(readTag(block, "GUID")),
         masterId: stripXml(readTag(block, "MASTERID")),
@@ -438,6 +574,13 @@ export function parseStockItems(xml: string) {
 
         name: readName(block, "STOCKITEM"),
         parent: stripXml(readTag(block, "PARENT")) || "Uncategorized",
+        category: stockGroupHierarchy.rootStockGroupName,
+        subCategory: stockGroupHierarchy.stockGroupName,
+        sub_category: stockGroupHierarchy.stockGroupName,
+
+        stockGroupName: stockGroupHierarchy.stockGroupName,
+        rootStockGroupName: stockGroupHierarchy.rootStockGroupName,
+        stockGroupPath: stockGroupHierarchy.stockGroupPath,
 
         baseUnit,
         unit: baseUnit,
@@ -1160,7 +1303,7 @@ function parseOfficialBillFixedOutstandingRows(xml: string) {
 }
 
 export function parseOutstandings(xml: string) {
-  const source = String(xml || "");
+  const source = sanitizeTallyXmlText(xml);
 
   const voucherBlocks = extractBlocks(source, "VOUCHER");
 
@@ -1426,6 +1569,57 @@ function readBlocks(xml: string, tagName: string) {
   return String(xml || "").match(re) || [];
 }
 
+function readAllTagValues(block: string, tagName: string) {
+  const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(
+    `<${escapedTag}\\b[^>]*>([\\s\\S]*?)<\\/${escapedTag}>`,
+    "gi",
+  );
+
+  const values: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(block)) !== null) {
+    const value = stripXml(match[1]);
+    if (value) values.push(value);
+  }
+
+  return values;
+}
+
+function readAllUdfValuesBySuffix(block: string, suffix: string) {
+  const escapedSuffix = suffix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(
+    `<UDF:[^>\\s]*${escapedSuffix}\\b[^>]*>([\\s\\S]*?)<\\/UDF:[^>\\s]*${escapedSuffix}>`,
+    "gi",
+  );
+
+  const values: string[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(block)) !== null) {
+    const value = stripXml(match[1]);
+    if (value) values.push(value);
+  }
+
+  return values;
+}
+
+function isUsefulCostCenterName(value?: string | null) {
+  const normalized = normalizeText(value || "");
+
+  return Boolean(
+    normalized &&
+    ![
+      "unknown",
+      "not applicable",
+      "not available",
+      "not found",
+      "end of list",
+    ].includes(normalized),
+  );
+}
+
 function parseVoucherCostCenters(voucherBlock: string) {
   const allocations: Array<{
     guid: string | null;
@@ -1433,6 +1627,23 @@ function parseVoucherCostCenters(voucherBlock: string) {
     category: string | null;
     amount: number;
   }> = [];
+
+  const addAllocation = (input: {
+    guid?: string | null;
+    name?: string | null;
+    category?: string | null;
+    amount?: number;
+  }) => {
+    const name = stripXml(input.name || "");
+    if (!isUsefulCostCenterName(name)) return;
+
+    allocations.push({
+      guid: stripXml(input.guid || "") || null,
+      name,
+      category: stripXml(input.category || "") || null,
+      amount: Number(input.amount || 0),
+    });
+  };
 
   const categoryBlocks = readBlocks(voucherBlock, "CATEGORYALLOCATIONS.LIST");
 
@@ -1448,32 +1659,23 @@ function parseVoucherCostCenters(voucherBlock: string) {
     );
 
     for (const ccBlock of costCenterBlocks) {
-      const name =
-        stripXml(readTag(ccBlock, "NAME")) ||
-        stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
-        stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
-        "";
-
-      if (!name) continue;
-
-      const guid =
-        stripXml(readTag(ccBlock, "GUID")) ||
-        stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
-        stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
-        null;
-
-      const amount = toPositiveNumber(readTag(ccBlock, "AMOUNT"));
-
-      allocations.push({
-        guid,
-        name,
+      addAllocation({
+        guid:
+          stripXml(readTag(ccBlock, "GUID")) ||
+          stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
+          stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
+          null,
+        name:
+          stripXml(readTag(ccBlock, "NAME")) ||
+          stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
+          stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
+          "",
         category,
-        amount,
+        amount: toPositiveNumber(readTag(ccBlock, "AMOUNT")),
       });
     }
   }
 
-  // fallback: agar Tally XML me direct COSTCENTREALLOCATIONS.LIST aaye
   if (!allocations.length) {
     const directCostCenterBlocks = readBlocks(
       voucherBlock,
@@ -1481,37 +1683,63 @@ function parseVoucherCostCenters(voucherBlock: string) {
     );
 
     for (const ccBlock of directCostCenterBlocks) {
-      const name =
-        stripXml(readTag(ccBlock, "NAME")) ||
-        stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
-        stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
-        "";
-
-      if (!name) continue;
-
-      const guid =
-        stripXml(readTag(ccBlock, "GUID")) ||
-        stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
-        stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
-        null;
-
-      const category =
-        stripXml(readTag(ccBlock, "CATEGORY")) ||
-        stripXml(readTag(ccBlock, "COSTCATEGORY")) ||
-        null;
-
-      const amount = toPositiveNumber(readTag(ccBlock, "AMOUNT"));
-
-      allocations.push({
-        guid,
-        name,
-        category,
-        amount,
+      addAllocation({
+        guid:
+          stripXml(readTag(ccBlock, "GUID")) ||
+          stripXml(readTag(ccBlock, "COSTCENTREGUID")) ||
+          stripXml(readTag(ccBlock, "COSTCENTERGUID")) ||
+          null,
+        name:
+          stripXml(readTag(ccBlock, "NAME")) ||
+          stripXml(readTag(ccBlock, "COSTCENTRENAME")) ||
+          stripXml(readTag(ccBlock, "COSTCENTERNAME")) ||
+          "",
+        category:
+          stripXml(readTag(ccBlock, "CATEGORY")) ||
+          stripXml(readTag(ccBlock, "COSTCATEGORY")) ||
+          null,
+        amount: toPositiveNumber(readTag(ccBlock, "AMOUNT")),
       });
     }
   }
 
-  // duplicate same name/category ko merge kar do
+  /**
+   * Tally sometimes does not send CATEGORYALLOCATIONS/COSTCENTREALLOCATIONS.
+   * In such vouchers it sends direct COSTCENTRENAME or custom UDF bill CC.
+   * Example: <COSTCENTRENAME>ATVI</COSTCENTRENAME>
+   * Example: <UDF:CCM_VCHBILLCC>ATVI</UDF:CCM_VCHBILLCC>
+   */
+  if (!allocations.length) {
+    const fallbackNames = [
+      ...readAllTagValues(voucherBlock, "COSTCENTRENAME"),
+      ...readAllTagValues(voucherBlock, "COSTCENTERNAME"),
+      ...readAllTagValues(voucherBlock, "UDF:CCM_VCHBILLCC"),
+      ...readAllUdfValuesBySuffix(voucherBlock, "VCHBILLCC"),
+      ...readAllUdfValuesBySuffix(voucherBlock, "BILLCC"),
+    ];
+
+    const fallbackGuid =
+      readFirstAvailableTag(voucherBlock, [
+        "COSTCENTREGUID",
+        "COSTCENTERGUID",
+      ]) || null;
+
+    const fallbackCategory =
+      readFirstAvailableTag(voucherBlock, [
+        "COSTCATEGORY",
+        "COSTCATEGORYNAME",
+      ]) || null;
+
+    for (const name of fallbackNames) {
+      addAllocation({
+        guid: fallbackGuid,
+        name,
+        category: fallbackCategory,
+        amount: 0,
+      });
+    }
+  }
+
   const merged = new Map<
     string,
     {
@@ -1523,12 +1751,14 @@ function parseVoucherCostCenters(voucherBlock: string) {
   >();
 
   for (const row of allocations) {
-    const key = `${row.guid || ""}::${row.name.toLowerCase()}::${row.category || ""}`;
+    const key = `${row.guid || ""}::${normalizeText(row.name)}::${normalizeText(
+      row.category || "",
+    )}`;
 
     const existing = merged.get(key);
 
     if (existing) {
-      existing.amount += row.amount;
+      existing.amount += Number(row.amount || 0);
     } else {
       merged.set(key, { ...row });
     }
@@ -1585,7 +1815,7 @@ function parseVoucherOrders(
   expectedVoucherType: string,
   options: VoucherOrderParseOptions = {},
 ) {
-  const source = String(xml || "");
+  const source = sanitizeTallyXmlText(xml);
 
   const voucherBlocks = source.match(/<VOUCHER\b[\s\S]*?<\/VOUCHER>/gi) || [];
 

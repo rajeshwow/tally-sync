@@ -233,7 +233,35 @@ export async function fetchStockItemsXml(companyName?: string) {
         <TDLMESSAGE>
           <COLLECTION NAME="CRM Stock Items" ISMODIFY="No">
             <TYPE>Stock Item</TYPE>
-            <FETCH>Name,Guid,MasterId,AlterId,Parent,BaseUnits,OpeningBalance,OpeningRate,OpeningValue,GSTHSNCode</FETCH>
+            <FETCH>Name,Guid,MasterId,AlterId,Parent,BaseUnits,OpeningBalance,OpeningRate,OpeningValue,ClosingBalance,ClosingRate,ClosingValue,GSTHSNCode,Description,PartNo,Manufacturer,Brand</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>
+`;
+
+  return postToTally(xml);
+}
+
+export async function fetchStockGroupsXml(companyName?: string) {
+  const xml = `
+<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>CRM Stock Groups</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      ${buildStaticVariables(companyName)}
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="CRM Stock Groups" ISMODIFY="No">
+            <TYPE>Stock Group</TYPE>
+            <FETCH>Name,Guid,MasterId,AlterId,Parent</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -373,10 +401,16 @@ export async function fetchSalesOrdersXml(
               BasicBuyerName,
               BasicOrderRef,
               BasicDueDateOfPymt,
+              CostCentreName,
+              CostCenterName,
+              CostCategoryName,
               LedgerEntries,
               AllLedgerEntries,
+              BillAllocations,
               InventoryEntries,
-              AllInventoryEntries
+              AllInventoryEntries,
+              CategoryAllocations,
+              CostCentreAllocations
             </FETCH>
             <FILTER>OnlySalesVouchers</FILTER>
             <FILTER>DateInSelectedRange</FILTER>
@@ -432,10 +466,16 @@ export async function fetchPurchaseOrdersXml(
               BasicSupplierName,
               BasicOrderRef,
               BasicDueDateOfPymt,
+              CostCentreName,
+              CostCenterName,
+              CostCategoryName,
               LedgerEntries,
               AllLedgerEntries,
+              BillAllocations,
               InventoryEntries,
-              AllInventoryEntries
+              AllInventoryEntries,
+              CategoryAllocations,
+              CostCentreAllocations
             </FETCH>
             <FILTER>OnlyPurchaseVouchers</FILTER>
             <FILTER>DateInSelectedRange</FILTER>
@@ -502,7 +542,11 @@ export async function fetchHistoricalSalesVouchersXml(
               InventoryEntries,
               AllInventoryEntries,
               CategoryAllocations,
-              CostCentreAllocations
+              CostCentreAllocations,
+               CostCentreName,
+              CostCenterName,
+              CostCategoryName,
+              BillAllocations
             </FETCH>
             <FILTER>OnlyDeepSalesVouchers</FILTER>
             <FILTER>DateInSelectedRange</FILTER>
@@ -563,7 +607,11 @@ export async function fetchHistoricalPurchaseVouchersXml(
               InventoryEntries,
               AllInventoryEntries,
               CategoryAllocations,
-              CostCentreAllocations
+              CostCentreAllocations,
+               CostCentreName,
+              CostCenterName,
+              CostCategoryName,
+              BillAllocations
             </FETCH>
              <FILTER>OnlyDeepPurchaseVouchers</FILTER>
             <FILTER>DateInSelectedRange</FILTER>
